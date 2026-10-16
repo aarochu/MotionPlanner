@@ -211,3 +211,57 @@ Arm and gripper names are set in `ARM_GRIPPERS` at the top of `streamlit_app.py`
 - Run sequence moves one arm at a time, not both at once.
 - `collision_sensitivity` on the arm config is 0 by default; consider a small non-zero value for
   first tests with the cap.
+
+## Arm 1: YOLO head-on pick and place
+
+The dashboard opens on a **Simple** tab with two buttons for arm 1 (everything else is under **Full controls**).
+Both ask for confirmation, move only arm 1, and STOP ALL stops them between steps.
+
+- **Reset arm 1**: open the gripper; unless already at `parking`, back straight out 100 mm along the gripper,
+  rise to z 380 mm, then a joint move to `parking`. The retreat and rise keep the fingers off a bottle just placed.
+- **Run YOLO pick & place** (must start at `parking` or `NewMid`): `NewMid` → YOLO + aligned depth locate the
+  leftmost bottle over 5 frames → level pre-grasp 100 mm in front → straight in → grab (on a miss: open, back out,
+  stop) → lift 100 mm → joint move to above the place spot → straight down to a set-down height worked out from
+  the measured bottle → keep holding it (arm 1 steadies the bottle for arm 2).
+
+Code: `yolo_grab.py` (measuring, planning, the two routines; no Streamlit), tests in `tests/test_yolo_grab.py`.
+The same moves are available step by step in **Full controls → Camera — cam on arm** (Locate, pre-grasp, go in
+and grab, back out, straight nudges, level, yaw).
+
+How it aims, and the numbers measured on 2026-10-16:
+
+- The bottle axis comes from depth on the leftmost box's centre strip; the bottle's width per height comes from its
+  silhouette (cobalt glass + depth). The grasp is at 35% of the bottle's height, with the gripper level.
+- **Lateral trim 18 mm (right)**: the frame system puts the camera 46 mm left of the gripper; by eye the camera's
+  centre estimate still read ~18 mm left of the real centre. **Depth trim +20 mm**: the finger pads go 20 mm past
+  the bottle axis. Both are settings in `yolo_grab.DEFAULTS` and the YOLO grab settings panel.
+- Body grasps are tight: the bottle is ~80 mm, the gripper opens 84 mm. The plan refuses only if the bottle reads
+  more than 2.5 mm per side wider than the opening.
+- Place spot: arm end at x −91.1, y −379.5, heading −31.9°, level; `PLACE_ABOVE_JOINTS` puts it 200 mm up.
+  `TABLE_Z = -8.7` mm (bottle set down by eye at arm-end z 104.0 with the pads 112.7 mm above its measured bottom).
+  Set-down height = `TABLE_Z` + (grasp height − bottle bottom), from each run's measurement.
+- Collision stop is off on `arm`; nothing models the bottles. The carry and reset paths were checked in simulation
+  against the box and a placed bottle, not against arm 2: keep arm 2 clear of the place spot.
+
+The earlier side-grab work (look steps, taught side approach/grasp/exit) was dropped; it is kept on the local
+branch `archive/side-grab`.
+
+### Machine configuration change, 2026-10-16
+
+Added module `bottle-yolo-module`, registry ID `viam-labs:YOLOv8`, pinned to `1.0.1`;
+added vision service `bottle-yolo`, model `viam-labs:vision:yolov8`, with
+`{"model_location": "yolov8n.pt", "camera_name": "cam"}`. The module downloads the pretrained weights on first start.
+See the [module documentation](https://github.com/viam-labs/YOLOv8).
+To revert, remove the service `bottle-yolo` and the module `bottle-yolo-module` from this machine's
+configuration. Leave the other modules, services, components and fragment mods untouched.
+A private pre-change snapshot was saved at `/tmp/motionplanner-before-yolo.json`; avoid restoring the
+whole snapshot over later teammates' changes.
+
+### Standalone YOLO preview
+
+The **YOLO bottle preview — Arm 1 camera** section works at any arm position, independently
+of sequence setup or grasp calibration. Live mode refreshes every two seconds; turn it off
+and use **Refresh YOLO preview** for individual snapshots. Bottles show numbered boxes and
+confidence scores, with the leftmost bottle green. **Show other detected objects** adds
+other classes in blue to help diagnose misclassification. Its confidence slider affects
+only the viewer. All viewer operations are read-only.

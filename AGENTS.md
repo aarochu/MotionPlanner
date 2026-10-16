@@ -52,6 +52,7 @@ Arm settings (both): `speed_degs_per_sec: 60` (module default), acceleration at 
 |---|---|
 | `streamlit_app.py` | The dashboard (Rishi's GUI, extended). Joints, jog, gripper, keyframes, Run sequence, and a camera section that follows the active arm |
 | `vision.py` | Pink-marker detection and positioning for `arm` (no UI code) |
+| `yolo_grab.py` | YOLO head-on grab for `arm`: measure, plan, straight steps, levelling, and the Simple tab's reset / pick & place (no UI code) |
 | `poses_io.py` | `poses.json` reading/writing and which keyframes each Run choice plays (no UI code) |
 | `import_poses.py` | CLI to add keyframes from another poses file after the existing ones |
 | `cap_vision.py` | Rishi's cap detection for `cam2` (`circle_features`, `detect_circles` are imported by the dashboard) |
@@ -137,7 +138,14 @@ distance from aligned depth if ≥ 60% of a center disk is valid, else from cap 
 diameter). **Align** moves `arm2` so `gripper2` is over the cap with `move_to_position`, max 100 mm per press,
 after a confirmation.
 
-### `arm` (Aaron's logic, `vision.py`)
+### `arm`, current: YOLO head-on pick and place (`yolo_grab.py`, 2026-10-16)
+
+The dashboard's **Simple** tab (Reset arm 1; Run YOLO pick & place) and the arm camera panel in **Full controls**
+replaced the pink-marker locate and corrected grab in the UI. See README "Arm 1: YOLO head-on pick and place" for
+how it aims and the measured trims, table height and place spot. Verified on hardware: locate, level pre-grasp,
+body grab with the trims, lift, carry and set-down done step by step. The two buttons as a whole: unit tests only.
+
+### `arm`, earlier: pink marker (Aaron's logic, `vision.py`; no longer in the UI)
 
 - **Marker:** a pink sticky note on the bottle with a small black dot in its middle. Found by HSV color
   (hue 165–179, sat ≥ 100, val ≥ 80); the largest blob wins. An optional shape check (rectangularity / aspect)

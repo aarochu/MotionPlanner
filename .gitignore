@@ -2,3 +2,4 @@ env.sh
 .venv/
 __pycache__/
 poses.json.bak
+bottle_actions.json
