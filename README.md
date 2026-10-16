@@ -16,6 +16,29 @@ It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam mac
 - Reorder, delete, replay (Go) and run all keyframes in order across both arms
 - Export keyframes as a Python `POSES = {...}` dict for use in your own scripts
 - STOP ALL button for both arms
+- Live `cam2` feed (wrist camera on `arm2`) with circle detection (e.g. a bottle cap), optional depth view,
+  and an **Align** button that moves `arm2` so `gripper2` sits over the circle
+
+## Camera alignment
+
+`cam2` is a RealSense on `arm2`'s wrist, looking down. Each frame the app finds circles with a Hough
+transform and keeps only the bottle cap: a circle that is mostly silver (bright, unsaturated), has almost no
+dark pixels (the dark bottle body and neck fail this) and has a crisp outline most of the way round (partial
+circles inside the cap fail this). **Align** uses the median cap over 5 frames, so one bad frame cannot steer
+the arm. Turn on *Show rejected circles* to see what was filtered out (thin red). Its distance comes
+from the depth image when at least 60% of the circle has a depth reading, otherwise from the circle's pixel size
+and the cap diameter you enter (`Z = fx · D / 2r`). The center pixel is deprojected with `cam2`'s intrinsics and
+transformed through the Viam frame system into `arm2`'s base frame.
+
+**Align** keeps the arm's orientation and moves only position: XY only by default, or XY plus a hover height
+above the circle. Each move is capped at 100 mm (`MAX_ALIGN_MM`); press Align again to close the rest, which
+also corrects for any error in the first estimate. A confirmation shows the planned move before anything moves.
+
+Requirements on the Viam side:
+
+- `cam2` needs `"align_color_depth": true` so depth pixels line up with color pixels.
+- The D435 cannot measure closer than about 28 cm at 1280×720. Closer than that (e.g. the cap right under the
+  gripper) the app falls back to the cap-size estimate, so set the cap diameter accurately.
 
 Moves are joint-space (`move_to_joint_positions`), so they are repeatable and the motion planner
 cannot pick a surprising path.
