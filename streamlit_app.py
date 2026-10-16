@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -153,15 +154,18 @@ with save_col:
         g_action = st.selectbox(
             "Gripper action after arriving", ["none", "grab", "open"], help="Played when this keyframe runs."
         )
+        delay = st.number_input("Delay after (seconds)", min_value=0.0, max_value=600.0, step=0.5, value=0.0,
+                                help="Pause after this keyframe's move and gripper action, before the next one.")
         if st.button(f"💾 Save current pose of {arm}", type="primary", use_container_width=True):
             if not name.strip():
                 st.error("Give the keyframe a name.")
             else:
                 def do_save():
                     pose = {"name": name.strip(), "arm": arm, "values": joints(arm),
-                            "gripper": "" if g_action == "none" else g_action}
+                            "gripper": "" if g_action == "none" else g_action, "delay": delay}
                     save_poses([p for p in load_poses() if p["name"] != pose["name"]] + [pose])
                 if safely(do_save):
+                    st.session_state[f"delay_{name.strip()}"] = delay
                     st.toast(f"Saved '{name.strip()}'")
                     st.rerun()
 
@@ -196,6 +200,10 @@ def confirm_run():
                 apply_gripper(p["arm"], p.get("gripper"))
             if not safely(step_fn):
                 return
+            wait = p.get("delay", 0.0)
+            if wait > 0 and n < len(poses):
+                st.write(f"⏱ waiting {wait:g} s")
+                time.sleep(wait)
             progress.progress(n / len(poses))
         st.success("Sequence complete")
 
@@ -241,23 +249,37 @@ with st.container(border=True):
         confirm_targets(arm, targets)
 
 # ---------- keyframe table ----------
+def set_delay(pose_name):
+    all_poses = load_poses()
+    for q in all_poses:
+        if q["name"] == pose_name:
+            q["delay"] = st.session_state[f"delay_{pose_name}"]
+    save_poses(all_poses)
+
+
+
 st.divider()
 st.subheader("Keyframes (play order, top → bottom)")
 poses = load_poses()
 if not poses:
     st.info("No keyframes yet. Jog the arm to a pose and save it above.")
 else:
-    header = st.columns([0.4, 2, 1, 4, 1, 3])
-    for col, text in zip(header, ["#", "Name", "Arm", "Joints (deg)", "Gripper", ""]):
+    COLS = [0.4, 2, 1, 4, 1, 1.4, 3]
+    header = st.columns(COLS)
+    for col, text in zip(header, ["#", "Name", "Arm", "Joints (deg)", "Gripper", "Delay after (s)", ""]):
         col.markdown(f"**{text}**")
     for i, p in enumerate(poses):
-        row = st.columns([0.4, 2, 1, 4, 1, 3])
+        row = st.columns(COLS)
         row[0].write(i + 1)
         row[1].write(p["name"])
         row[2].write(p.get("arm", "arm"))
         row[3].code("  ".join(f"{v:7.1f}" for v in p["values"]), language=None)
         row[4].write(p.get("gripper") or "–")
-        go_c, up_c, down_c, del_c = row[5].columns(4)
+        row[5].number_input(
+            "Delay after (s)", min_value=0.0, max_value=600.0, step=0.5, value=float(p.get("delay", 0.0)),
+            key=f"delay_{p['name']}", label_visibility="collapsed", on_change=set_delay, args=(p["name"],),
+        )
+        go_c, up_c, down_c, del_c = row[6].columns(4)
         if go_c.button("Go", key=f"go{i}"):
             confirm_go(i)
         if up_c.button("↑", key=f"up{i}", disabled=i == 0):
@@ -269,9 +291,12 @@ else:
             save_poses(poses)
             st.rerun()
         if del_c.button("✕", key=f"del{i}"):
+            st.session_state.pop(f"delay_{p['name']}", None)
             save_poses(poses[:i] + poses[i + 1:])
             st.rerun()
 
+    st.caption(f"Total programmed delay: {sum(q.get('delay', 0.0) for q in poses[:-1]):g} s "
+               "(the last keyframe's delay is ignored)")
     run_c, _ = st.columns([1, 3])
     if run_c.button("▶ Run sequence", type="primary", use_container_width=True):
         confirm_run()
@@ -279,6 +304,6 @@ else:
     with st.expander("Export as Python"):
         lines = ["POSES = {"]
         for p in poses:
-            lines.append(f"    {p['name']!r}: ({p.get('arm', 'arm')!r}, {[round(v, 3) for v in p['values']]}),")
+            lines.append(f"    {p['name']!r}: ({p.get('arm', 'arm')!r}, {[round(v, 3) for v in p['values']]}, {p.get('delay', 0.0):g}),")
         lines.append("}")
         st.code("\n".join(lines), language="python")
