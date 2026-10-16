@@ -12,6 +12,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import streamlit as st
+import poses_io
 import vision as V
 from viam.components.arm import Arm, JointPositions
 from viam.components.camera import Camera
@@ -94,38 +95,13 @@ def get_robot():
 run, ROBOT, ARMS, GRIPPERS, CAM_RIGS = get_robot()
 
 
-# poses.json groups keyframes by the arm they belong to, so it's unambiguous which arm each one drives.
-POSE_GROUP_DESC = {
-    "arm": "Keyframes for arm (arm 1, with cam and gripper): picks up the bottle and holds it. NOT for arm2.",
-    "arm2": "Keyframes for arm2 (with cam2 and gripper2): unscrews the cap. NOT for arm.",
-}
-
-
 def load_poses():
-    """Flat list of keyframes (each with its "arm"), in play order. Reads the grouped format, or an old flat list."""
-    if not POSES_FILE.exists():
-        return []
-    data = json.loads(POSES_FILE.read_text())
-    if isinstance(data, list):
-        return data
-    order = data.get("play_order")
-    flat = [dict(kf, arm=arm_name) for arm_name, group in data.items() if isinstance(group, dict)
-            for kf in group.get("keyframes", [])]
-    if order:  # keep the cross-arm play order the table and Run sequence use
-        rank = {(o["arm"], o["name"]): n for n, o in enumerate(order)}
-        flat.sort(key=lambda kf: rank.get((kf["arm"], kf["name"]), len(rank)))
-    return flat
+    """Flat list of keyframes (each with its "arm"), in play order. File format: see poses_io.py."""
+    return poses_io.load(POSES_FILE)
 
 
 def save_poses(poses):
-    """Write keyframes grouped by arm, with a description per group, plus the cross-arm play order."""
-    data = {}
-    for arm_name in list(RIGS) + sorted({p.get("arm", "arm") for p in poses} - set(RIGS)):
-        group = [p for p in poses if p.get("arm", "arm") == arm_name]
-        data[arm_name] = {"description": POSE_GROUP_DESC.get(arm_name, f"Keyframes for {arm_name}."),
-                          "keyframes": group}
-    data["play_order"] = [{"arm": p.get("arm", "arm"), "name": p["name"]} for p in poses]
-    POSES_FILE.write_text(json.dumps(data, indent=2) + "\n")
+    poses_io.save(POSES_FILE, poses)
 
 
 def joints(arm):
@@ -400,13 +376,23 @@ def confirm_go(idx):
 
 
 @st.dialog("Run sequence")
-def confirm_run():
-    poses = load_poses()
-    st.write(f"Play all **{len(poses)}** keyframes in order, one at a time?")
+def confirm_run(selection):
+    poses = poses_io.sequence(load_poses(), selection)
+    label = poses_io.RUN_OPTIONS[selection]
+    if not poses:
+        st.warning(f"No keyframes saved for {label}.")
+        return
+    counts = {a: sum(p["arm"] == a for p in poses) for a in poses_io.ARMS}
+    st.write(f"Play **{len(poses)}** keyframe(s) for **{label}**, one move at a time?")
+    if selection == "arm_then_arm2":
+        st.caption(f"First all {counts['arm']} arm keyframe(s), then all {counts['arm2']} arm2 keyframe(s). "
+                   "The two arms never move at the same time.")
     st.caption("Keep the e-stop in reach.")
     if st.button("Yes, run", type="primary"):
         progress = st.progress(0.0)
         for n, p in enumerate(poses, 1):
+            if n > 1 and p["arm"] != poses[n - 2]["arm"]:
+                st.write(f"— {poses[n - 2]['arm']} done, starting {p['arm']} —")
             st.write(f"{n}/{len(poses)}: {p['arm']} → {p['name']}")
             def step_fn(p=p):
                 move(p["arm"], p["values"])
@@ -897,11 +883,16 @@ else:
             save_poses(poses[:i] + poses[i + 1:])
             st.rerun()
 
-    st.caption(f"Total programmed delay: {sum(q.get('delay', 0.0) for q in poses[:-1]):g} s "
-               "(the last keyframe's delay is ignored)")
+    selection = st.radio("Run which keyframes", list(poses_io.RUN_OPTIONS), format_func=poses_io.RUN_OPTIONS.get,
+                         horizontal=True, key="run_selection",
+                         help="arm, then arm2: all of arm's keyframes first, then all of arm2's, whatever the "
+                              "table order.")
+    chosen = poses_io.sequence(poses, selection)
+    st.caption(f"{len(chosen)} keyframe(s) selected · total programmed delay "
+               f"{sum(q.get('delay', 0.0) for q in chosen[:-1]):g} s (the last keyframe's delay is ignored)")
     run_c, _ = st.columns([1, 3])
     if run_c.button("▶ Run sequence", type="primary", use_container_width=True):
-        confirm_run()
+        confirm_run(selection)
 
     with st.expander("Export as Python"):
         lines = ["POSES = {"]

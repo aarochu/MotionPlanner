@@ -7,6 +7,7 @@ other unscrews the cap.
 It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam machine (`armfarm16`).
 
 Picking up the bottle-stabilizer (`arm`) work? Start with [`HANDOFF.md`](HANDOFF.md).
+Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer? See [`RUN_BOTH.md`](RUN_BOTH.md).
 
 ## Features
 
@@ -126,6 +127,8 @@ Then open http://127.0.0.1:8501.
 | `vision_config.json` | Saved detector settings (colors, shape gates, depth range). Loaded on start; edit it by hand or use **Save as default** |
 | `poses.json` | Saved keyframes, grouped by arm: the `arm` group (arm 1, picks up and holds the bottle) and the `arm2` group (unscrews the cap). Each group says which arm it drives, and `play_order` keeps the order across both |
 | `grab_reference.json` | Corrected-grab references for `arm` (created when you teach them) |
+| `poses_io.py` | Reading and writing `poses.json`, and which keyframes each Run sequence choice plays |
+| `import_poses.py` | Adds keyframes from another poses file (e.g. Rishi's `arm2` ones) after the existing ones |
 
 Detection is color first, then shape. Color finds blobs; each blob is scored on rectangularity, aspect
 ratio and solidity, and only blobs that pass the gates are considered. The best-scoring one is used.

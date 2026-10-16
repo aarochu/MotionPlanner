@@ -30,7 +30,7 @@ for confirmation first.
 | `grabframe1` | −50.7, 6.0, −68.7, 110.5, 58.6, 236.9 | – | After the grab |
 | `end` | −117.6, 27.5, −43.9, 94.1, 88.6, 199.4 | – | Holding position on the table |
 
-**Run sequence** plays these exactly as taught. It does **not** apply the camera correction.
+**Run sequence** plays these exactly as taught. It does **not** apply the camera correction. To run this sequence and then Rishi's `arm2` sequence on one computer, see `RUN_BOTH.md` (Run sequence → **arm, then arm2**).
 
 ## How the camera finds the bottle
 
