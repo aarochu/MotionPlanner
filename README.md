@@ -16,6 +16,54 @@ It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam mac
 - Reorder, delete, replay (Go) and run all keyframes in order across both arms
 - Export keyframes as a Python `POSES = {...}` dict for use in your own scripts
 - STOP ALL button for both arms
+- A camera section that follows the **active arm**, with a live feed and optional depth view. Each arm has its
+  own detector:
+  - **`arm2` (`cam2`): bottle cap** (his logic). Finds the silver cap and has an **Align** button that moves
+    `arm2` so `gripper2` sits over it.
+  - **`arm` (`cam`): pink marker on the bottle** (Aaron's logic). Finds the pink marker and reports its world
+    position with **Locate bottle**. It is read-only and never moves the arm.
+
+## Bottle cap detection and alignment (`arm2`)
+
+`cam2` is a RealSense on `arm2`'s wrist, looking down. Each frame the app finds circles with a Hough
+transform and keeps only the bottle cap: a circle that is mostly silver (bright, unsaturated), has almost no
+dark pixels (the dark bottle body and neck fail this) and has a crisp outline most of the way round (partial
+circles inside the cap fail this). **Align** uses the median cap over 5 frames, so one bad frame cannot steer
+the arm. Turn on *Show rejected circles* to see what was filtered out (thin red). Its distance comes
+from the depth image when at least 60% of the circle has a depth reading, otherwise from the circle's pixel size
+and the cap diameter you enter (`Z = fx · D / 2r`). The center pixel is deprojected with `cam2`'s intrinsics and
+transformed through the Viam frame system into `arm2`'s base frame.
+
+**Align** keeps the arm's orientation and moves only position: XY only by default, or XY plus a hover height
+above the circle. Each move is capped at 100 mm (`MAX_ALIGN_MM`); press Align again to close the rest, which
+also corrects for any error in the first estimate. A confirmation shows the planned move before anything moves.
+
+Requirements on the Viam side:
+
+- `cam2` needs `"align_color_depth": true` so depth pixels line up with color pixels.
+- The D435 cannot measure closer than about 28 cm at 1280×720. Closer than that (e.g. the cap right under the
+  gripper) the app falls back to the cap-size estimate, so set the cap diameter accurately.
+
+## Pink marker detection (`arm`)
+
+`cam` is a RealSense on `arm`'s wrist. A pink note or band on the bottle is found by color (HSV range), and the
+largest pink blob wins. An optional shape check (rectangularity and aspect ratio) can reject blobs that don't
+look like a rectangle; it is off by default. The logic lives in `vision.py` and is shown in the same camera
+section as the cap detector.
+
+**Locate bottle** captures one frame and converts the marker to world x, y, z in one of two ways:
+
+- **Depth** (camera looking level): median depth over the marker, then the bottle axis is one bottle radius
+  behind that surface along the camera ray.
+- **Plane** (camera looking down): casts the camera ray through the marker's center and intersects it with a
+  horizontal plane at the bottle's grasp height.
+
+Pink settings are saved with **Save as default** in `vision_config.json` and loaded on start. Nothing in the
+pink path moves an arm: there is no Align for `arm` until the grasp sequence is designed.
+
+Notes: depth only lines up with the color image if the camera has `"align_color_depth": true` in the Viam
+config (`cam2` does; `cam` did not when last checked). Depth cameras of this type can't read closer than about
+30 to 40 cm, so scan from 40 to 50 cm away.
 
 Moves are joint-space (`move_to_joint_positions`), so they are repeatable and the motion planner
 cannot pick a surprising path.
@@ -62,6 +110,7 @@ ratio and solidity, and only blobs that pass the gates are considered. The best-
 | `VIAM_API_KEY` | Viam API key (required) |
 | `VIAM_MACHINE_ADDRESS` | Machine address, e.g. `armfarm16-main.<location>.viam.cloud` |
 | `POSES_FILE` | Where keyframes are saved (default `poses.json`) |
+| `VISION_CONFIG_FILE` | Saved pink-detection settings (default `vision_config.json`) |
 
 Arm and gripper names are set in `ARM_GRIPPERS` at the top of `streamlit_app.py`.
 

@@ -1,4 +1,4 @@
-"""Streamlit keyframe recorder for Viam arms (arm + arm2).
+"""Streamlit keyframe recorder for Viam arms (arm + arm2), plus cam2 cap detection and alignment.
 
 Config comes from environment variables (see env.sh / run.sh); nothing secret is stored in code.
 """
@@ -13,26 +13,24 @@ import cv2
 import numpy as np
 import streamlit as st
 import vision as V
-from viam.components.camera import Camera
 from viam.components.arm import Arm, JointPositions
+from viam.components.camera import Camera
 from viam.components.gripper import Gripper
+from viam.proto.common import Pose, PoseInFrame
 from viam.robot.client import RobotClient
 
 ADDRESS = os.environ.get("VIAM_MACHINE_ADDRESS", "armfarm16-main.310sld03v2.viam.cloud")
+API_KEY_ID = os.environ["VIAM_API_KEY_ID"]
+API_KEY = os.environ["VIAM_API_KEY"]
 ARM_GRIPPERS = {"arm": "gripper", "arm2": "gripper2"}
-CAMERAS = {"arm": "cam", "arm2": "cam2"}
 POSES_FILE = Path(os.environ.get("POSES_FILE", "poses.json"))
 MAX_JOG_DEG = 15.0
 JOINTS = [f"Joint {i}" for i in range(6)]  # 0-based, matching the Viam app
-# What each xArm6 joint does, in plain words
-JOINT_DESC = [
-    "Base spin: turns the whole arm left/right",
-    "Shoulder: tilts the arm forward/back",
-    "Elbow: bends the arm to reach in/out",
-    "Forearm roll: twists the forearm along its length",
-    "Wrist bend: tilts the gripper up/down",
-    "Wrist twist: spins the gripper (the unscrew motion)",
-]
+# arm -> (its wrist camera, its gripper). The camera section follows the active arm, and each arm has its own
+# detector: arm2 finds the bottle CAP (silver circle, Hough); arm finds the bottle's PINK marker (color blob).
+RIGS = {"arm": ("cam", "gripper"), "arm2": ("cam2", "gripper2")}
+VISION_CONFIG_FILE = Path(os.environ.get("VISION_CONFIG_FILE", "vision_config.json"))
+MAX_ALIGN_MM = 100.0  # longest single alignment move; run Align again to close the rest
 
 st.set_page_config(page_title="Arm Keyframes", page_icon="🦾", layout="wide")
 
@@ -48,18 +46,21 @@ def get_robot():
 
     async def connect():
         opts = RobotClient.Options.with_api_key(
-            api_key=os.environ["VIAM_API_KEY"], api_key_id=os.environ["VIAM_API_KEY_ID"]
+            api_key=API_KEY, api_key_id=API_KEY_ID
         )
         robot = await RobotClient.at_address(ADDRESS, opts)
-        arms, grippers, cams = {}, {}, {}
+        arms, grippers = {}, {}
         for arm_name, grip_name in ARM_GRIPPERS.items():
             try:
                 arms[arm_name] = Arm.from_robot(robot, arm_name)
                 grippers[arm_name] = Gripper.from_robot(robot, grip_name)
             except Exception:  # arm2 may not be wired up yet
-                continue
+                pass
+        cams = {}
+        for arm_name, (cam_name, _) in RIGS.items():
             try:
-                cams[arm_name] = Camera.from_robot(robot, CAMERAS[arm_name])
+                camera = Camera.from_robot(robot, cam_name)
+                cams[arm_name] = (camera, (await camera.get_properties()).intrinsic_parameters)
             except Exception:
                 pass
         return robot, arms, grippers, cams
@@ -68,7 +69,7 @@ def get_robot():
     return run, robot, arms, grippers, cams
 
 
-run, ROBOT, ARMS, GRIPPERS, CAMS = get_robot()
+run, ROBOT, ARMS, GRIPPERS, CAM_RIGS = get_robot()
 
 
 def load_poses():
@@ -103,6 +104,145 @@ def safely(fn, *args):
         return False
 
 
+# ---------- cam2 vision ----------
+def capture():
+    """Color (BGR) and depth (uint16 mm, aligned to color when cam2 has align_color_depth) from cam2."""
+    imgs, _ = run(CAMERA.get_images())
+    by_name = {i.name: i for i in imgs}
+    bgr = cv2.imdecode(np.frombuffer(by_name["color"].data, np.uint8), cv2.IMREAD_COLOR)
+    depth = None
+    if "depth" in by_name:  # image/vnd.viam.dep: 8-byte magic, width, height (big-endian u64), then big-endian u16 mm
+        data = by_name["depth"].data
+        w, h = int.from_bytes(data[8:16], "big"), int.from_bytes(data[16:24], "big")
+        depth = np.frombuffer(data[24:], ">u2").reshape(h, w)
+    return bgr, depth
+
+
+def circle_features(hsv, edges, u, v, r):
+    """Silver fraction and dark fraction inside the circle, and how much of its outline lies on an edge."""
+    h, w = edges.shape
+    yy, xx = np.ogrid[:h, :w]
+    inner = (xx - u) ** 2 + (yy - v) ** 2 <= (0.8 * r) ** 2
+    sat, val = hsv[..., 1][inner], hsv[..., 2][inner]
+    silver = float(((sat < 50) & (val > 110)).mean())
+    dark = float((val < 70).mean())
+    ang = np.linspace(0, 2 * np.pi, 180, endpoint=False)[:, None]
+    rad = r + np.arange(-4, 5)[None, :]  # tolerate a few px of radius error
+    xs = np.clip((u + rad * np.cos(ang)).astype(int), 0, w - 1)
+    ys = np.clip((v + rad * np.sin(ang)).astype(int), 0, h - 1)
+    rim = float(edges[ys, xs].any(axis=1).mean())
+    return silver, dark, rim
+
+
+def detect_circles(bgr, min_r, max_r, sensitivity, min_silver, min_rim):
+    """Hough circles split into (caps, rejected), each as (u, v, r, score), caps best first.
+
+    A cap is mostly silver (low saturation, bright), has almost no dark pixels (the dark blue bottle body and
+    neck fail here) and has a crisp outline most of the way round (partial circles inside the cap fail here).
+    Caps whose center falls inside a better cap are duplicates of it and are rejected too."""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    found = cv2.HoughCircles(cv2.medianBlur(gray, 5), cv2.HOUGH_GRADIENT, dp=1.2, minDist=max(min_r, 40),
+                             param1=120, param2=sensitivity, minRadius=min_r, maxRadius=max_r)
+    if found is None:
+        return [], []
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
+    candidates, rejected = [], []
+    for u, v, r in found[0][:12]:
+        silver, dark, rim = circle_features(hsv, edges, u, v, r)
+        c = (float(u), float(v), float(r), silver * rim)
+        (candidates if silver >= min_silver and dark <= 0.15 and rim >= min_rim else rejected).append(c)
+    caps = []
+    for c in sorted(candidates, key=lambda c: -c[3]):
+        if any((c[0] - k[0]) ** 2 + (c[1] - k[1]) ** 2 < k[2] ** 2 for k in caps):
+            rejected.append(c)
+        else:
+            caps.append(c)
+    return caps, rejected
+
+
+def detect_stable(detect, frames=5, min_hits=3):
+    """Best cap over several frames: median of the per-frame winners after dropping ones far from the median,
+    so a single bad frame (blur, a partial circle inside the cap) cannot steer the arm.
+    Returns (bgr, depth, circle, hits) from the last frame with a cap, or None if too few frames agree."""
+    hits, last = [], None
+    for _ in range(frames):
+        bgr, depth = capture()
+        caps, _ = detect_circles(bgr, *detect)
+        if caps:
+            hits.append(caps[0])
+            last = (bgr, depth)
+    if len(hits) < min_hits:
+        return None
+    arr = np.array(hits)
+    med = np.median(arr, axis=0)
+    agree = arr[np.hypot(arr[:, 0] - med[0], arr[:, 1] - med[1]) < 0.3 * med[2]]
+    if len(agree) < min_hits:
+        return None
+    return (*last, tuple(float(x) for x in np.median(agree, axis=0)), len(agree))
+
+
+def measure(circle, depth, cap_diameter_mm):
+    """Camera-frame point (mm) of the circle's center. Uses aligned depth when enough of the disk is valid,
+    otherwise falls back to the pinhole size estimate Z = fx * D / (2r) (e.g. cap closer than the D435 min range)."""
+    u, v, r, _ = circle
+    i = INTRINSICS
+    z, method, valid = None, "size", 0.0
+    if depth is not None:
+        h, w = depth.shape
+        yy, xx = np.ogrid[:h, :w]
+        vals = depth[(xx - u) ** 2 + (yy - v) ** 2 <= (0.6 * r) ** 2]
+        valid = float((vals > 0).mean()) if vals.size else 0.0
+        if valid >= 0.6:  # below this the valid pixels are mostly background leaking in at the rim
+            z, method = float(np.median(vals[vals > 0])), "depth"
+    if z is None:
+        z = i.focal_x_px * cap_diameter_mm / (2 * r)
+    x = (u - i.center_x_px) * z / i.focal_x_px
+    y = (v - i.center_y_px) * z / i.focal_y_px
+    return {"x": x, "y": y, "z": z, "method": method, "valid": valid}
+
+
+def to_frame(frame, x=0.0, y=0.0, z=0.0, src=None):
+    return run(ROBOT.transform_pose(PoseInFrame(reference_frame=src or CAM, pose=Pose(x=x, y=y, z=z, o_z=1)), frame)).pose
+
+
+def plan_align(point, hover_mm, keep_height):
+    """Arm-base-frame target that puts gripper2 over the circle center (orientation unchanged)."""
+    cap = to_frame(f"{CAM_ARM}_origin", point["x"], point["y"], point["z"])
+    grip = to_frame(f"{CAM_ARM}_origin", src=CAM_GRIPPER)
+    delta = np.array([cap.x - grip.x, cap.y - grip.y, 0.0 if keep_height else cap.z + hover_mm - grip.z])
+    norm = float(np.linalg.norm(delta))
+    clamped = norm > MAX_ALIGN_MM
+    if clamped:
+        delta *= MAX_ALIGN_MM / norm
+    end = run(ARMS[CAM_ARM].get_end_position())
+    target = Pose(x=end.x + delta[0], y=end.y + delta[1], z=end.z + delta[2],
+                  o_x=end.o_x, o_y=end.o_y, o_z=end.o_z, theta=end.theta)
+    return {"cap": cap, "cap_world": to_frame("world", point["x"], point["y"], point["z"]),
+            "grip_world": to_frame("world", src=CAM_GRIPPER), "grip": grip, "delta": delta, "norm": norm,
+            "clamped": clamped, "target": target}
+
+
+def annotate(bgr, circles, rejected=()):
+    out = bgr.copy()
+    cv2.drawMarker(out, (int(INTRINSICS.center_x_px), int(INTRINSICS.center_y_px)), (255, 255, 0),
+                   cv2.MARKER_CROSS, 30, 2)
+    for u, v, r, _ in rejected:
+        cv2.circle(out, (int(u), int(v)), int(r), (0, 0, 255), 1)
+    for n, (u, v, r, _) in enumerate(circles):
+        color = (0, 255, 0) if n == 0 else (160, 160, 160)
+        cv2.circle(out, (int(u), int(v)), int(r), color, 4 if n == 0 else 2)
+        cv2.circle(out, (int(u), int(v)), 4, color, -1)
+    return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+
+
+def colorize_depth(depth, near=150, far=600):
+    scaled = np.clip((depth.astype(np.int32) - near) * 255 // (far - near), 0, 255).astype(np.uint8)
+    rgb = cv2.cvtColor(cv2.applyColorMap(255 - scaled, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
+    rgb[depth == 0] = 0  # no reading (too close, too far, or specular)
+    return rgb
+
+
 # ---------- sidebar ----------
 with st.sidebar:
     st.title("🦾 Arm Keyframes")
@@ -115,15 +255,20 @@ with st.sidebar:
     st.caption("Keep the e-stop within reach.")
 
 
+# the camera helpers below read these; they follow the active arm
+CAM_ARM = arm
+CAM, CAM_GRIPPER = RIGS[arm]
+CAMERA, INTRINSICS = CAM_RIGS.get(arm, (None, None))
+
+
 # ---------- live joints ----------
 @st.fragment(run_every=1.0)
 def live_joints(arm_name):
     st.subheader(f"Live joints — {arm_name}")
     try:
         vals = joints(arm_name)
-        for col, name, v, desc in zip(st.columns(6), JOINTS, vals, JOINT_DESC):
+        for col, name, v in zip(st.columns(6), JOINTS, vals):
             col.metric(name, f"{v:.1f}°")
-            col.caption(desc)
         p = run(ARMS[arm_name].get_end_position())
         st.caption(
             f"End effector — x {p.x:.1f}, y {p.y:.1f}, z {p.z:.1f} mm · "
@@ -144,7 +289,7 @@ with jog_col:
         step = st.select_slider("Step (degrees)", [0.5, 1, 2, 5, 10], value=2)
         for i, name in enumerate(JOINTS):
             label, minus, plus = st.columns([2, 1, 1])
-            label.markdown(f"**{name}**  \n{JOINT_DESC[i]}")
+            label.markdown(f"**{name}**")
             for btn_col, sign, sym in ((minus, -1, "−"), (plus, 1, "+")):
                 if btn_col.button(sym, key=f"jog{i}{sym}", use_container_width=True):
                     delta = sign * step
@@ -206,13 +351,9 @@ def confirm_go(idx):
 
 
 @st.dialog("Run sequence")
-def confirm_run(selection):
-    poses = [q for q in load_poses() if selection == "both" or q.get("arm", "arm") == selection]
-    label = "both arms" if selection == "both" else selection
-    if not poses:
-        st.warning(f"No keyframes saved for {label}.")
-        return
-    st.write(f"Play **{len(poses)}** keyframe(s) for **{label}** in order, one at a time?")
+def confirm_run():
+    poses = load_poses()
+    st.write(f"Play all **{len(poses)}** keyframes in order, one at a time?")
     st.caption("Keep the e-stop in reach.")
     if st.button("Yes, run", type="primary"):
         progress = st.progress(0.0)
@@ -263,8 +404,7 @@ with st.container(border=True):
     st.subheader("Move to joint angles")
     cols = st.columns(6)
     targets = [
-        col.number_input(name, min_value=-360.0, max_value=360.0, step=1.0, format="%.2f", key=f"tgt{i}",
-                         help=JOINT_DESC[i])
+        col.number_input(name, min_value=-360.0, max_value=360.0, step=1.0, format="%.2f", key=f"tgt{i}")
         for i, (col, name) in enumerate(zip(cols, JOINTS))
     ]
     b1, b2, _ = st.columns([1, 1, 4])
@@ -272,136 +412,204 @@ with st.container(border=True):
     if b2.button("Move", type="primary", use_container_width=True):
         confirm_targets(arm, targets)
 
-# ---------- vision (detection logic lives in vision.py) ----------
-VISION_CONFIG_FILE = Path(os.environ.get("VISION_CONFIG_FILE", "vision_config.json"))
-VISION_KEYS = ("hue_rng", "sat_min", "val_min", "min_area", "use_shape", "min_rect", "max_aspect", "vision_method",
-               "bottle_radius", "depth_rng", "plane_z")
+# ---------- cam2 feed, circle detection and alignment ----------
+@st.dialog("Align to circle", width="large")
+def confirm_align(settings):
+    if st.session_state.get("align_yes") and "align_plan" in st.session_state:
+        # "Yes, move" reruns this dialog: execute the plan that was shown, not a fresh detection
+        with st.spinner("Moving…"):
+            ok = safely(lambda: run(ARMS[CAM_ARM].move_to_position(st.session_state.pop("align_plan")["target"])))
+        if ok:
+            st.rerun()
+        return
+    try:
+        found = detect_stable(settings["detect"])
+        if found is None:
+            st.error("No cap found consistently across 5 frames. Adjust the detection settings and try again.")
+            return
+        bgr, depth, circle, hits = found
+        point = measure(circle, depth, settings["cap_d"])
+        plan = plan_align(point, settings["hover"], settings["keep_height"])
+    except Exception as e:
+        st.error(str(e))
+        return
+    st.image(annotate(bgr, [circle]), use_container_width=True)
+    st.caption(f"Cap at ({circle[0]:.0f}, {circle[1]:.0f}) px, r {circle[2]:.0f} px · median of {hits}/5 frames")
+    dx, dy, dz = plan["delta"]
+    cw, g = plan["cap_world"], plan["grip_world"]
+    st.table({
+        "": ["Circle center (world)", f"{CAM_GRIPPER} now (world)", "Move", "Distance from"],
+        "x (mm)": [f"{cw.x:.1f}", f"{g.x:.1f}", f"{dx:+.1f}", ""],
+        "y (mm)": [f"{cw.y:.1f}", f"{g.y:.1f}", f"{dy:+.1f}", ""],
+        "z (mm)": [f"{cw.z:.1f}", f"{g.z:.1f}", f"{dz:+.1f}", "depth" if point["method"] == "depth" else "cap size"],
+    })
+    if point["method"] == "size":
+        st.warning(f"Depth only covers {point['valid']:.0%} of the circle (likely closer than the camera's "
+                   f"minimum range), so distance is estimated from a {settings['cap_d']:g} mm cap diameter.")
+    if plan["clamped"]:
+        st.info(f"Full correction is {plan['norm']:.0f} mm; this move is limited to {MAX_ALIGN_MM:.0f} mm. "
+                "Run Align again afterwards.")
+    if not settings["keep_height"] and plan["grip"].z + dz < plan["cap"].z + 20:
+        st.error("Target would put the gripper within 20 mm of the circle. Increase the hover height.")
+        return
+    st.caption("Keep the e-stop in reach. Orientation is kept; only the position changes.")
+    st.session_state["align_plan"] = plan
+    st.button("Yes, move", type="primary", key="align_yes")
 
 
 def use_gripper_height():
-    st.session_state["plane_z"] = float(V.world_point(run, ROBOT, ARM_GRIPPERS[arm])[2])
+    st.session_state["m_plane"] = float(V.world_point(run, ROBOT, ARM_GRIPPERS[arm])[2])
 
 
-st.divider()
-st.subheader(f"Vision — {CAMERAS[arm]} on {arm}")
-st.caption("Read-only: captures a camera frame, finds the bottle by color, keeps only blobs that look like a "
-           "rectangle, and converts the result to world x, y, z. Nothing here moves an arm.")
-if arm not in CAMS:
-    st.warning(f"No camera available for {arm}.")
-else:
-    img_col, vis_col = st.columns([3, 2])
-    cfg = V.load_config(VISION_CONFIG_FILE)
-    with vis_col:
-        with st.container(border=True):
-            st.markdown("**1. Color (HSV)**")
-            hue = st.slider("Hue range", 0, 179, (cfg["hue_lo"], cfg["hue_hi"]), key="hue_rng",
-                            help="OpenCV hue 0–179. The pink note measures about 173–175; blue is about 100–130.")
-            sat_min = st.slider("Min saturation", 0, 255, cfg["sat_min"], key="sat_min")
-            val_min = st.slider("Min brightness", 0, 255, cfg["val_min"], key="val_min")
-            min_area = st.slider("Min blob area (px)", 100, 100000, cfg["min_area"], step=100, key="min_area")
-        with st.container(border=True):
-            st.markdown("**2. Shape**")
-            use_shape = st.checkbox("Enable shape check", value=bool(cfg["use_shape"]), key="use_shape",
-                                    help="Off: any color blob counts (the largest wins). On: blobs must also look "
-                                         "like a rectangle.")
-            min_rect = st.slider("Min rectangularity", 0.0, 1.0, float(cfg["min_rect"]), step=0.05, key="min_rect",
-                                 disabled=not use_shape,
-                                 help="Blob area ÷ area of its tightest rotated rectangle. 1.0 is a perfect "
-                                      "rectangle; a circle is about 0.79.")
-            max_aspect = st.slider("Max aspect ratio", 1.0, 5.0, float(cfg["max_aspect"]), step=0.1,
-                                   key="max_aspect", disabled=not use_shape,
-                                   help="Long side ÷ short side. 1.0 is square.")
-        method = st.radio("Position method", list(V.METHODS), key="vision_method",
-                          index=list(V.METHODS).index(cfg["method"]),
-                          help="Depth uses the target's measured distance. Plane assumes the bottle's grasp point is "
-                               "at a known height and needs the camera to look downward.")
-        use_depth = method.startswith("Depth")
-        radius, (d_lo, d_hi), plane_z = cfg["radius"], (cfg["depth_lo"], cfg["depth_hi"]), cfg["plane_z"]
-        with st.container(border=True):
-            if use_depth:
-                st.markdown("**Depth settings**")
-                radius = st.number_input("Bottle radius (mm)", min_value=5.0, max_value=150.0, value=float(cfg["radius"]),
-                                         step=1.0, key="bottle_radius",
-                                         help="Distance from the target surface to the bottle's axis.")
-                d_lo, d_hi = st.slider("Valid depth range (mm)", 100, 3000, (cfg["depth_lo"], cfg["depth_hi"]),
-                                       step=10, key="depth_rng",
-                                       help="Readings outside this range are ignored (background, glare).")
-            else:
-                st.markdown("**Bottle plane height**")
-                st.session_state.setdefault("plane_z", cfg["plane_z"])
-                plane_z = st.number_input("z of the bottle's grasp point (mm, world frame)", step=1.0, format="%.1f",
-                                          key="plane_z")
-                st.button("Use current gripper height", on_click=use_gripper_height,
-                          help="Jog the gripper to the height where it should grab the bottle, then click.")
+def locate_result(cap, cfg):
+    """Position of the pink marker from the last Locate capture (read-only)."""
+    if cap is None or cap["arm"] != CAM_ARM:
+        st.info("Press **Locate bottle** to find the pink marker and get its world position.")
+        return
+    _, hit, cands = V.detect(cap["bgr"], cfg)
+    st.caption(f"Located from the frame captured at {cap['time']}. Locate again after moving the arm.")
+    if not hit:
+        st.warning("No pink marker in that frame. Adjust the pink detection settings.")
+        return
+    depth_mode = cfg["method"].startswith("Depth")
+    stats = None
+    if depth_mode:
+        world, stats, note = V.depth_to_world(cap, hit, cfg["radius"], cfg["depth_lo"], cfg["depth_hi"])
+    else:
+        world, note = V.pixel_to_world(cap, *hit["px"], cfg["plane_z"])
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Pixel (u, v)", f"{hit['px'][0]:.0f}, {hit['px'][1]:.0f}")
+    m2.metric("Blob size (px)", f"{hit['bbox'][2]} × {hit['bbox'][3]}")
+    if world is None:
+        st.error(note)
+    else:
+        m3.metric("World x, y (mm)", f"{world[0]:.1f}, {world[1]:.1f}")
+        m4.metric("World z (mm)", f"{world[2]:.1f}")
+        if note:
+            st.warning(note)
+    if stats and "median" in stats:
+        st.caption(f"Marker depth: median {stats['median']:.0f} mm, spread {stats['spread']:.0f} mm, "
+                   f"{stats['valid_frac']:.0%} of pixels valid ({stats['n']} px).")
+    if depth_mode:
+        st.caption("Depth mode needs `align_color_depth: true` on this camera in the Viam config "
+                   "(cam2 has it; cam did not when last checked), otherwise depth won't line up with the image.")
 
-        live_cfg = {"hue_lo": hue[0], "hue_hi": hue[1], "sat_min": sat_min, "val_min": val_min,
-                    "min_area": min_area, "use_shape": use_shape, "min_rect": min_rect, "max_aspect": max_aspect,
-                    "method": method,
-                    "radius": radius, "depth_lo": d_lo, "depth_hi": d_hi, "plane_z": plane_z}
-        save_c, reset_c = st.columns(2)
-        if save_c.button("💾 Save as default", use_container_width=True,
-                         help=f"Writes these settings to {VISION_CONFIG_FILE} so they load every time."):
-            V.save_config(VISION_CONFIG_FILE, live_cfg)
-            st.toast(f"Saved to {VISION_CONFIG_FILE}")
-        if reset_c.button("↩ Reset to saved", use_container_width=True,
-                          help="Discard unsaved slider changes and reload the saved defaults."):
-            for k in VISION_KEYS:
-                st.session_state.pop(k, None)
-            st.rerun()
-        if st.button("📷 Capture & detect", type="primary", use_container_width=True):
-            try:
-                with st.spinner("Capturing…"):
-                    st.session_state["capture"] = V.capture_frame(run, ROBOT, CAMS[arm], CAMERAS[arm], arm)
-            except Exception as e:
-                st.error(f"Capture failed: {e}")
 
-    cap = st.session_state.get("capture")
-    with img_col:
-        if cap is None or cap["arm"] != arm:
-            st.info("Press **Capture & detect** to grab a frame from this arm's camera.")
+if CAMERA is not None and CAM_ARM in ARMS:
+    st.divider()
+    st.subheader(f"Camera — {CAM} on {CAM_ARM}")
+    marker_mode = CAM_ARM == "arm"   # arm: pink bottle marker (read-only)   arm2: bottle cap (+ Align)
+    feed_col, ctrl_col = st.columns([3, 1])
+    with ctrl_col:
+        live = st.toggle("Live feed", value=True)
+        show_depth = st.toggle("Show depth", value=False)
+        if not marker_mode:
+            with st.expander("Detection", expanded=False):
+                min_r, max_r = st.slider("Radius (px)", 10, 400, (40, 250))
+                sensitivity = st.slider("Strictness", 20, 120, 50, help="Hough accumulator threshold; higher finds fewer circles.")
+                min_silver = st.slider("Min silver", 0.0, 1.0, 0.5, 0.05,
+                                       help="Share of the circle that is bright and unsaturated. Cap ≈ 0.8, bottle ≈ 0.15.")
+                min_rim = st.slider("Min outline", 0.0, 1.0, 0.55, 0.05,
+                                    help="Share of the circle's outline on an image edge. Cap ≈ 0.7–0.8; partial circles ≈ 0.4.")
+                show_rejected = st.toggle("Show rejected circles", value=False)
+                cap_d = st.number_input("Cap diameter (mm)", 5.0, 150.0, 30.0, 0.5,
+                                        help="Used to estimate distance when depth has no reading on the circle.")
+            keep_height = st.radio("Align", ["XY only (keep height)", "XY + hover above"], index=0) == "XY only (keep height)"
+            hover = st.number_input("Hover above circle (mm)", 20.0, 300.0, 80.0, 5.0, disabled=keep_height)
+            settings = {"detect": (min_r, max_r, sensitivity, min_silver, min_rim),"cap_d": cap_d, "hover": hover, "keep_height": keep_height}
+            if st.button(f"🎯 Align {CAM_ARM} to circle", type="primary", use_container_width=True):
+                confirm_align(settings)
         else:
-            mask, hit, candidates = V.detect(cap["bgr"], live_cfg)
-            shown = V.draw_detections(cap["bgr"], hit, candidates)
-            tab_img, tab_mask, tab_depth = st.tabs(["Detection", "Mask", "Depth"])
-            tab_img.image(cv2.cvtColor(shown, cv2.COLOR_BGR2RGB), width="stretch")
-            tab_img.caption("Green = chosen · cyan = passed the shape check but scored lower · red = rejected by shape.")
-            tab_mask.image(mask, width="stretch")
-            if cap.get("depth") is not None:
-                tab_depth.image(V.depth_preview(cap["depth"]), width="stretch")
-                tab_depth.caption("Blue = near, red = far (0–2 m). Black = no reading.")
-            st.caption(f"Frame captured at {cap['time']}. Re-capture after moving the arm.")
-
-            if candidates:
-                with st.expander(f"{len(candidates)} color blob(s) found", expanded=not hit):
-                    st.dataframe([{
-                        "area (px)": int(c["area"]), "rectangularity": round(c["rectangularity"], 2),
-                        "aspect": round(c["aspect"], 2), "solidity": round(c["solidity"], 2),
-                        "result": "chosen" if c is hit else ("ok, lower score" if c["accepted"] else c["reason"]),
-                    } for c in sorted(candidates, key=lambda c: -c["area"])], hide_index=True)
-            if not candidates:
-                st.warning("No color match. Adjust the HSV sliders (check the Mask tab) or the minimum area.")
-            elif not hit:
-                st.warning("Color blobs were found but none passed the shape check. See the table above, "
-                           "or relax the rectangularity / aspect sliders.")
+            cfg = V.load_config(VISION_CONFIG_FILE)
+            with st.expander("Pink detection", expanded=False):
+                hue = st.slider("Hue range", 0, 179, (cfg["hue_lo"], cfg["hue_hi"]), key="m_hue",
+                                help="OpenCV hue 0–179. The pink note measures about 173–175.")
+                sat_min = st.slider("Min saturation", 0, 255, cfg["sat_min"], key="m_sat")
+                val_min = st.slider("Min brightness", 0, 255, cfg["val_min"], key="m_val")
+                min_area = st.slider("Min blob area (px)", 100, 100000, cfg["min_area"], step=100, key="m_area")
+                use_shape = st.checkbox("Enable shape check", value=bool(cfg["use_shape"]), key="m_shape",
+                                        help="Off: the largest pink blob wins. On: the blob must also look like a rectangle.")
+                min_rect = st.slider("Min rectangularity", 0.0, 1.0, float(cfg["min_rect"]), step=0.05, key="m_rect",
+                                     disabled=not use_shape)
+                max_aspect = st.slider("Max aspect ratio", 1.0, 5.0, float(cfg["max_aspect"]), step=0.1,
+                                       key="m_aspect", disabled=not use_shape)
+            method = st.radio("Position method", list(V.METHODS), key="m_method", index=list(V.METHODS).index(cfg["method"]),
+                              help="Depth uses the marker's measured distance. Plane assumes a known grasp height and "
+                                   "needs the camera to look downward.")
+            radius, (d_lo, d_hi), plane_z = cfg["radius"], (cfg["depth_lo"], cfg["depth_hi"]), cfg["plane_z"]
+            if method.startswith("Depth"):
+                radius = st.number_input("Bottle radius (mm)", 5.0, 150.0, float(cfg["radius"]), 1.0, key="m_radius",
+                                         help="Distance from the marker surface to the bottle's axis.")
+                d_lo, d_hi = st.slider("Valid depth (mm)", 100, 3000, (cfg["depth_lo"], cfg["depth_hi"]), step=10,
+                                       key="m_depth")
             else:
-                stats = None
-                if use_depth:
-                    world, stats, note = V.depth_to_world(cap, hit, radius, d_lo, d_hi)
-                else:
-                    world, note = V.pixel_to_world(cap, *hit["px"], plane_z)
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Pixel (u, v)", f"{hit['px'][0]:.0f}, {hit['px'][1]:.0f}")
-                m2.metric("Blob size (px)", f"{hit['bbox'][2]} × {hit['bbox'][3]}")
-                if world is None:
-                    st.error(note)
-                else:
-                    m3.metric("World x, y (mm)", f"{world[0]:.1f}, {world[1]:.1f}")
-                    m4.metric("World z (mm)", f"{world[2]:.1f}")
-                    if note:
-                        st.warning(note)
-                if stats and "median" in stats:
-                    st.caption(f"Target depth: median {stats['median']:.0f} mm, spread {stats['spread']:.0f} mm, "
-                               f"{stats['valid_frac']:.0%} of pixels valid ({stats['n']} px).")
+                st.session_state.setdefault("m_plane", cfg["plane_z"])
+                plane_z = st.number_input("Grasp point z (mm, world)", step=1.0, format="%.1f", key="m_plane")
+                st.button("Use current gripper height", on_click=use_gripper_height)
+            live_cfg = {"hue_lo": hue[0], "hue_hi": hue[1], "sat_min": sat_min, "val_min": val_min,
+                        "min_area": min_area, "use_shape": use_shape, "min_rect": min_rect, "max_aspect": max_aspect,
+                        "method": method, "radius": radius, "depth_lo": d_lo, "depth_hi": d_hi, "plane_z": plane_z}
+            if st.button("💾 Save as default", use_container_width=True,
+                         help=f"Writes these pink-detection settings to {VISION_CONFIG_FILE}."):
+                V.save_config(VISION_CONFIG_FILE, live_cfg)
+                st.toast(f"Saved to {VISION_CONFIG_FILE}")
+            settings = {"cfg": live_cfg}
+            if st.button("📍 Locate bottle", type="primary", use_container_width=True,
+                         help="Read-only: grabs a frame, finds the pink marker and reports its world position. "
+                              "Nothing moves."):
+                try:
+                    with st.spinner("Capturing…"):
+                        st.session_state["locate"] = V.capture_frame(run, ROBOT, CAMERA, CAM, CAM_ARM)
+                except Exception as e:
+                    st.error(f"Capture failed: {e}")
+
+    @st.fragment(run_every=1.0 if live else None)
+    def cam_feed_cap(settings):
+        try:
+            bgr, depth = capture()
+            circles, rejected = detect_circles(bgr, *settings["detect"])
+        except Exception as e:
+            st.warning(f"Could not read {CAM}: {e}")
+            return
+        img_col, depth_col = st.columns(2) if show_depth and depth is not None else (st.container(), None)
+        img_col.image(annotate(bgr, circles, rejected if show_rejected else ()), use_container_width=True)
+        if depth_col is not None:
+            depth_col.image(colorize_depth(depth), use_container_width=True, caption="Depth (black = no reading)")
+        if circles:
+            u, v, r, _ = circles[0]
+            p = measure(circles[0], depth, settings["cap_d"])
+            st.caption(f"Circle at ({u:.0f}, {v:.0f}) px, r {r:.0f} px · camera frame x {p['x']:.1f}, "
+                       f"y {p['y']:.1f}, z {p['z']:.1f} mm ({'depth' if p['method'] == 'depth' else 'from cap size'}"
+                       f", depth valid {p['valid']:.0%}) · {len(rejected)} other circles rejected")
+        else:
+            st.caption(f"No cap found ({len(rejected)} circles rejected).")
+
+    @st.fragment(run_every=1.0 if live else None)
+    def cam_feed_marker(settings):
+        try:
+            bgr, depth = capture()
+            _, hit, cands = V.detect(bgr, settings["cfg"])
+        except Exception as e:
+            st.warning(f"Could not read {CAM}: {e}")
+            return
+        img_col, depth_col = st.columns(2) if show_depth and depth is not None else (st.container(), None)
+        img_col.image(cv2.cvtColor(V.draw_detections(bgr, hit, cands), cv2.COLOR_BGR2RGB), use_container_width=True)
+        if depth_col is not None:
+            depth_col.image(colorize_depth(depth), use_container_width=True, caption="Depth (black = no reading)")
+        if hit:
+            st.caption(f"Pink marker at ({hit['px'][0]:.0f}, {hit['px'][1]:.0f}) px, "
+                       f"{hit['bbox'][2]} × {hit['bbox'][3]} px · {len(cands) - 1} other blob(s)")
+        else:
+            st.caption(f"No pink marker found ({len(cands)} blob(s) rejected by the shape check)." if cands
+                       else "No pink marker found.")
+
+    with feed_col:
+        if marker_mode:
+            cam_feed_marker(settings)
+            locate_result(st.session_state.get("locate"), settings["cfg"])
+        else:
+            cam_feed_cap(settings)
+
 
 # ---------- keyframe table ----------
 def set_delay(pose_name):
@@ -450,15 +658,11 @@ else:
             save_poses(poses[:i] + poses[i + 1:])
             st.rerun()
 
-    RUN_OPTIONS = {"both": "Both arms", "arm": "arm only", "arm2": "arm2 only"}
-    selection = st.radio("Run which keyframes", list(RUN_OPTIONS), format_func=RUN_OPTIONS.get,
-                         horizontal=True, key="run_selection")
-    chosen = [q for q in poses if selection == "both" or q.get("arm", "arm") == selection]
-    st.caption(f"{len(chosen)} keyframe(s) selected · total programmed delay "
-               f"{sum(q.get('delay', 0.0) for q in chosen[:-1]):g} s (the last keyframe's delay is ignored)")
+    st.caption(f"Total programmed delay: {sum(q.get('delay', 0.0) for q in poses[:-1]):g} s "
+               "(the last keyframe's delay is ignored)")
     run_c, _ = st.columns([1, 3])
     if run_c.button("▶ Run sequence", type="primary", use_container_width=True):
-        confirm_run(selection)
+        confirm_run()
 
     with st.expander("Export as Python"):
         lines = ["POSES = {"]
