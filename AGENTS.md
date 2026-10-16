@@ -87,7 +87,7 @@ Current `arm` keyframes:
 
 | Keyframe | Joints 0–5 (°) | Gripper | Role |
 |---|---|---|---|
-| `parking` | −34.8, −75.8, −2.9, 164.9, 9.4, 194.1 | – | Rest; camera sees the whole bottle (parking scan) |
+| `parking` | −34.8, −75.8, −2.9, 164.9, 9.4, 194.1 | open | Rest; camera sees the whole bottle (parking scan) |
 | `NewMid` | −64.7, 11.8, −54.1, 107.2, 72.4, 218.7 | – | Scan pose for the corrected grab |
 | `grab_pos` | −49.3, 22.0, −70.6, 117.0, 58.7, 222.2 | grab | Grabs the bottle |
 | `grabframe1` | −50.7, 6.0, −68.7, 110.5, 58.6, 236.9 | – | After the grab |
@@ -109,7 +109,9 @@ chosen by the planner). **Save as** picks the type when saving. Each keyframe ca
 (grab/open) and a delay after it.
 
 **Full run** (`bottle_task.py`, panel above the keyframe table): (1) the "arm, then arm2" keyframes except
-`trash_drop_pose`; (2) the unscrew with the Unscrew panel's settings; (3) straight up to `open_bottle_cap_up_pose`'s
+`trash_drop_pose`; `arm2` starts moving to `safe_bottle_start_pose` together with `arm`'s first keyframe (`parking`,
+which now opens `arm`'s gripper); `arm` waits at `parking` until `arm2` has arrived, so that start is the only time
+both arms move; (2) the unscrew with the Unscrew panel's settings; (3) straight up to `open_bottle_cap_up_pose`'s
 height holding the cap (orientation kept), via `safe_bottle_start_pose` (move only), then `trash_drop_pose` + open.
 Names are code constants `UNSCREW_START_POSE`, `RETREAT_POSE`, `VIA_POSES`, `TRASH_DROP_POSE`. A failed step or
 Stop/STOP ALL halts both arms and skips the drop.

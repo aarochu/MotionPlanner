@@ -63,6 +63,7 @@ UNSCREW_START_POSE = "open_bottle_cap_pose"  # arm2 keyframe the unscrew sequenc
 TRASH_DROP_POSE = "trash_drop_pose"  # full run ends here (cap dropped); not part of its keyframe phase
 RETREAT_POSE = "open_bottle_cap_up_pose"  # full run: after unscrewing, rise to this pose's height before the drop
 VIA_POSES = ["safe_bottle_start_pose"]  # full run: then pass through these (move only, cap held) on the way to the drop
+ALONGSIDE_POSE = "safe_bottle_start_pose"  # full run: arm2 moves here together with arm's first keyframe; arm waits for it
 
 st.set_page_config(page_title="Arm Keyframes", page_icon="🦾", layout="wide")
 
@@ -918,12 +919,16 @@ if UNSCREWER is not None:
 
 # ---------- full run (bottle_task.py): arm's sequence, arm2's keyframes -> unscrew -> trash drop ----------
 @st.dialog("Full run", width="large")
-def confirm_full_run(keyframes, params, drop, retreat, via):
+def confirm_full_run(keyframes, params, drop, retreat, via, alongside):
     st.write("Run all three phases, one after another?")
     st.markdown("**1. Keyframes** (all of arm's, then arm2's)")
-    for kf in keyframes:
+    for n, kf in enumerate(keyframes):
         st.markdown(f"- {kf['arm']} → **{kf['name']}**" + (f", then gripper {kf['gripper']}" if kf.get("gripper") else "")
                     + (f", wait {kf['delay']:g} s" if kf.get("delay") else ""))
+        if n == 0 and alongside is not None:
+            st.markdown(f"  - **starting at the same time:** {alongside['arm']} → **{alongside['name']}**"
+                        + (f", then gripper {alongside['gripper']}" if alongside.get("gripper") else "")
+                        + f" — {kf['arm']} waits at {kf['name']} until {alongside['arm']} has arrived, then continues")
     st.markdown(f"**2. Unscrew** (arm2, settings from the Unscrew panel)")
     for line in describe(params):
         st.markdown(f"- {line}")
@@ -939,7 +944,7 @@ def confirm_full_run(keyframes, params, drop, retreat, via):
     st.caption("arm's sequence must end holding the bottle (its last keyframe has no gripper action). Keep the "
                "e-stop in reach; STOP ALL or Stop halts every phase.")
     if st.button("Yes, run all", type="primary"):
-        BOTTLE_TASK.start(keyframes, params, drop, retreat, via)
+        BOTTLE_TASK.start(keyframes, params, drop, retreat, via, alongside)
         st.rerun()
 
 
@@ -949,13 +954,20 @@ if BOTTLE_TASK is not None:
     all_kf = load_poses()
     drop_kf = next((k for k in all_kf if k["name"] == TRASH_DROP_POSE), None)
     pre_kf = [k for k in poses_io.sequence(all_kf, "arm_then_arm2") if k["name"] != TRASH_DROP_POSE]
+    # arm2 goes to its start pose while arm does its first keyframe, then skips it in its own part
+    alongside_kf = next((k for k in pre_kf if k["arm"] == "arm2" and k["name"] == ALONGSIDE_POSE), None)
+    if alongside_kf is not None and pre_kf and pre_kf[0]["arm"] != "arm2":
+        pre_kf = [k for k in pre_kf if k is not alongside_kf]
+    else:
+        alongside_kf = None
     retreat_kf = next((k for k in all_kf if k["name"] == RETREAT_POSE), None)
     via_kf = [k for name in VIA_POSES for k in all_kf if k["name"] == name]
     with st.container(border=True):
         if drop_kf is None:
             st.warning(f"Save a keyframe named `{TRASH_DROP_POSE}` (where the cap is dropped) to enable the full run.")
         else:
-            st.caption(f"1. Keyframes: {' → '.join(k['name'] for k in pre_kf) or '(none)'} · "
+            st.caption(f"1. Keyframes: {' → '.join(k['name'] for k in pre_kf) or '(none)'}"
+                       + (f" (arm2 → {alongside_kf['name']} starts together with {pre_kf[0]['name']})" if alongside_kf else "") + " · "
                        f"2. Unscrew with the settings above (start **{params.start_pose or 'current pose'}**, "
                        f"{'dry run' if params.dry_run else 'real cap'}) · "
                        + (f"3. straight up to **{RETREAT_POSE}**'s height holding the cap, then " if retreat_kf else "3. ")
@@ -964,7 +976,7 @@ if BOTTLE_TASK is not None:
         f1, f2, _ = st.columns([1, 1, 2])
         if f1.button("▶ Full run", type="primary", use_container_width=True,
                      disabled=drop_kf is None or busy or FULL_RUNNING):
-            confirm_full_run(pre_kf, params, drop_kf, retreat_kf, via_kf)
+            confirm_full_run(pre_kf, params, drop_kf, retreat_kf, via_kf, alongside_kf)
         if f2.button("⏹ Stop full run", use_container_width=True, disabled=not FULL_RUNNING):
             BOTTLE_TASK.stop()
             st.rerun()

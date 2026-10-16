@@ -43,17 +43,20 @@ class BottleTask:
         with self._lock:
             return dict(self._status)
 
-    def start(self, keyframes, unscrew_params, drop, retreat=None, via=()):
+    def start(self, keyframes, unscrew_params, drop, retreat=None, via=(), alongside=None):
         """keyframes: played in order first; unscrew_params: UnscrewParams; retreat: optional keyframe whose height
         the arm rises to right after the unscrew, straight up and keeping its current orientation (the wrist stays
         where the last twist left it; the keyframe's gripper action is skipped so the cap stays held); drop: the
         trash keyframe, played last. via: keyframes passed through between the retreat and the drop, motion only
-        (their gripper actions and delays are skipped, so the cap stays held)."""
+        (their gripper actions and delays are skipped, so the cap stays held). alongside: optional keyframe for
+        another arm, started at the same time as the first keyframe (e.g. arm2 to its start while arm goes to
+        parking). After that first keyframe the run waits until the alongside move has finished too, so from then
+        on only one arm moves at a time."""
         if self.running:
             return
         self._stop.clear()
         self._set(state="running", step="starting", error=None)
-        self._thread = threading.Thread(target=self._sequence, args=(list(keyframes), unscrew_params, drop, retreat, list(via)),
+        self._thread = threading.Thread(target=self._sequence, args=(list(keyframes), unscrew_params, drop, retreat, list(via), alongside),
                                         name="bottle-task", daemon=True)
         self._thread.start()
 
@@ -107,10 +110,43 @@ class BottleTask:
         target = Pose(x=e.x, y=e.y, z=z, o_x=e.o_x, o_y=e.o_y, o_z=e.o_z, theta=e.theta)
         self.run(arm.move_to_position(target))
 
-    def _sequence(self, keyframes, unscrew_params, drop, retreat, via):
+    def _move_and_grip(self, kf, errors):
+        """For the alongside move's thread: move + gripper action, recording any failure for the main thread."""
+        try:
+            go_to_keyframe(self.run, self.arms[kf["arm"]], kf)
+            if kf.get("gripper") and not self._stop.is_set():
+                apply_gripper(self.run, self.grippers[kf["arm"]], kf["gripper"])
+        except Exception as e:
+            errors.append(e)
+
+    def _sequence(self, keyframes, unscrew_params, drop, retreat, via, alongside):
+        side, errors = None, []
+
+        def wait_for_side(reason):
+            nonlocal side
+            if side is not None:
+                if side.is_alive():
+                    self._set(step=f"waiting for {alongside['arm']} to reach {alongside['name']} ({reason})")
+                side.join()
+                side = None
+            if errors:
+                raise RuntimeError(f"{alongside['arm']} to {alongside['name']}: {errors[0]}")
+
         try:
             for n, kf in enumerate(keyframes, 1):
-                self._keyframe(f"1/3 keyframes {n}/{len(keyframes)}", kf)
+                label = f"1/3 keyframes {n}/{len(keyframes)}"
+                if n == 1 and alongside is not None:
+                    self._check()
+                    side = threading.Thread(target=self._move_and_grip, args=(alongside, errors), daemon=True)
+                    side.start()  # e.g. arm2 heads to its start pose while arm runs its sequence
+                    label += f" (and {alongside['arm']} → {alongside['name']})"
+                elif alongside is not None and kf["arm"] == alongside["arm"]:
+                    wait_for_side(f"before its {kf['name']}")
+                self._keyframe(label, kf)
+                if n == 1:
+                    wait_for_side(f"{kf['arm']} waits at {kf['name']}")  # nothing else moves until both have arrived
+            if alongside is not None:
+                wait_for_side("before the unscrew")
 
             self._check()
             self.unscrewer.start(unscrew_params)
@@ -130,4 +166,6 @@ class BottleTask:
             self._set(state="done", step="complete")
         except Exception as e:
             self._halt()
+            if side is not None:
+                side.join(timeout=10)
             self._set(state="stopped" if isinstance(e, InterruptedError) else "error", error=str(e))

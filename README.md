@@ -102,7 +102,9 @@ cannot pick a surprising path.
 
 ## Full run (both arms)
 
-**Full run** plays, one after another, with the two arms never moving at the same time:
+**Full run** plays, one after another. The arms move one at a time, except at the start: `arm2` moves to
+`safe_bottle_start_pose` (`ALONGSIDE_POSE`) together with `arm`'s move to `parking`; `arm` then waits at `parking`
+until `arm2` has arrived before continuing (and `arm2` skips that keyframe in its own part):
 
 1. **Keyframes:** every `arm` keyframe (Aaron's sequence: `parking` → `NewMid` → `grab_pos` → `grabframe1` → `end`,
    which ends holding the bottle), then every `arm2` keyframe except `trash_drop_pose`
