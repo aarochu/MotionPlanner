@@ -1,2 +1,4 @@
+numpy==2.5.4
+opencv-python-headless==5.0.0.93
 streamlit==1.66.0
 viam-sdk==0.84.0

@@ -43,6 +43,17 @@ your machine → **Connect** → Code sample. Set `VIAM_MACHINE_ADDRESS` to your
 
 Then open http://127.0.0.1:8501.
 
+## Code layout
+
+| File | What it does |
+|---|---|
+| `streamlit_app.py` | The dashboard UI: joints, jogging, gripper, keyframes, and the Vision card |
+| `vision.py` | Detection and positioning, with no UI code: color mask, shape check, pixel/depth to world |
+| `vision_config.json` | Saved detector settings (colors, shape gates, depth range). Loaded on start; edit it by hand or use **Save as default** |
+
+Detection is color first, then shape. Color finds blobs; each blob is scored on rectangularity, aspect
+ratio and solidity, and only blobs that pass the gates are considered. The best-scoring one is used.
+
 ## Configuration
 
 | Variable | Purpose |

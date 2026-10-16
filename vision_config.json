@@ -1,0 +1,15 @@
+{
+  "hue_lo": 165,
+  "hue_hi": 179,
+  "sat_min": 100,
+  "val_min": 80,
+  "min_area": 1500,
+  "method": "Depth (camera looking level)",
+  "radius": 40.0,
+  "depth_lo": 200,
+  "depth_hi": 1500,
+  "plane_z": -97.0,
+  "min_rect": 0.8,
+  "max_aspect": 1.6,
+  "use_shape": false
+}
