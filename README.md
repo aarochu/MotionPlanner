@@ -15,6 +15,7 @@ It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam mac
 - Save the current pose as a named keyframe, optionally with a gripper action after arriving
 - Reorder, delete, replay (Go) and run all keyframes in order across both arms
 - Export keyframes as a Python `POSES = {...}` dict for use in your own scripts
+- Keyframes can be joints (`"values": [j0..j5]`, joint-space move) or a pose (`"pose": {"x", "y", "z", "o_x", "o_y", "o_z", "theta"}` in mm / orientation vector, in the arm's base frame as `get_end_position` reports; moved to with the motion planner). Choose with **Save as** when saving
 - STOP ALL button for both arms
 - Live `cam2` feed (wrist camera on `arm2`) with circle detection (e.g. a bottle cap), optional depth view,
   and an **Align** button that moves `arm2` so `gripper2` sits over the circle
@@ -33,6 +34,48 @@ transformed through the Viam frame system into `arm2`'s base frame.
 **Align** keeps the arm's orientation and moves only position: XY only by default, or XY plus a hover height
 above the circle. Each move is capped at 100 mm (`MAX_ALIGN_MM`); press Align again to close the rest, which
 also corrects for any error in the first estimate. A confirmation shows the planned move before anything moves.
+
+## Code layout
+
+| File | What it does |
+|---|---|
+| `streamlit_app.py` | Dashboard UI; keyframes, jog, camera panel |
+| `cap_vision.py` | Cap detection, depth/size distance, frame-system geometry. Never moves the arm |
+| `cap_tracker.py` | Optional slow XY tracking of the cap (toggle, off by default; on hold) |
+| `cap_unscrew.py` | Regrasp unscrew sequence and tool levelling |
+| `bottle_task.py` | Full run: keyframes → unscrew → trash drop |
+
+## Full run
+
+**Full run** plays, one after another: (1) every keyframe in table order except `trash_drop_pose`, (2) the unscrew
+sequence with the Unscrew panel's settings, (3) straight up to `open_bottle_cap_up_pose`'s height while still holding
+the cap, keeping the orientation the unscrew left (so it clears the bottle; `RETREAT_POSE` in `streamlit_app.py`), through `safe_bottle_start_pose` (move only, `VIA_POSES`), then `trash_drop_pose` and its
+gripper action (`open`, so the cap drops). Any failure or Stop ends the run where it is and stops the arms; it never continues to the drop after a
+failed unscrew. The drop keyframe name is `TRASH_DROP_POSE` in `streamlit_app.py`. Pose keyframes are in the arm's
+base frame; the Viam app's arm card shows world coordinates (for `arm2` the world Y is 914 mm lower).
+
+## Unscrew
+
+With the other arm holding the bottle, press **Unscrew**. The gripper opens to the release width and `arm2`
+moves to the **Start pose** keyframe (default `open_bottle_cap_pose`, `UNSCREW_START_POSE` in
+`streamlit_app.py`), which should put the open fingers around the cap. It then **levels the tool to point exactly straight down**,
+pivoting about the gripper (105 mm from the flange) so the fingers stay over the cap, and refuses if the pose
+is more than 15° off vertical. **Grip force** (G2 gripper, 1–100 %, default 60) applies to every grab and is
+reset to 50 % afterwards. Then each twist: **grab → unscrew** (rotate Joint 5 by the twist angle) **→ open →
+twist back**, all at the same height. The last twist keeps hold of the cap and **lifts it straight up** by the
+final lift, and the sequence ends there (it does not return to the start pose). The arm runs at
+the **Speed** setting (default 60°/s) and its speed is restored to 60°/s afterwards, even on error. Stop / STOP ALL halt it.
+
+It refuses to start unless the tool points straight down. With the tool down, +Joint 5 turns clockwise seen
+from above, so loosening is −Joint 5. **Do a dry run first** (on by default), without a cap: the full cycle
+runs, including open/close and the final lift, but an empty grab is not an error. Watch that the
+wrist turns counter-clockwise seen from above while closed; if not, switch the direction.
+
+Levelling builds the smallest tilt that points the tool down in the tool's own frame, lets the frame system
+convert it, and checks it before moving (axis down, gripper point fixed, roll unchanged).
+
+Don't command `arm2` from anywhere else (Viam app, another script, a config save) while a sequence runs: the
+xArm driver cancels the move in progress, which shows up as `context canceled`.
 
 Requirements on the Viam side:
 

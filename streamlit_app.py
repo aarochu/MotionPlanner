@@ -9,14 +9,18 @@ import threading
 import time
 from pathlib import Path
 
-import cv2
 import numpy as np
 import streamlit as st
 from viam.components.arm import Arm, JointPositions
 from viam.components.camera import Camera
 from viam.components.gripper import Gripper
-from viam.proto.common import Pose, PoseInFrame
 from viam.robot.client import RobotClient
+
+from cap_tracker import CapTracker
+import bottle_task
+from bottle_task import POSE_KEYS, BottleTask
+from cap_unscrew import UnscrewParams, Unscrewer, describe
+from cap_vision import CapVision, colorize_depth, detect_circles, robust_median
 
 ADDRESS = os.environ.get("VIAM_MACHINE_ADDRESS", "armfarm16-main.310sld03v2.viam.cloud")
 API_KEY_ID = os.environ["VIAM_API_KEY_ID"]
@@ -27,6 +31,10 @@ MAX_JOG_DEG = 15.0
 JOINTS = [f"Joint {i}" for i in range(6)]  # 0-based, matching the Viam app
 CAM, CAM_ARM, CAM_GRIPPER = "cam2", "arm2", "gripper2"  # wrist camera, the arm it rides on, and its gripper
 MAX_ALIGN_MM = 100.0  # longest single alignment move; run Align again to close the rest
+UNSCREW_START_POSE = "open_bottle_cap_pose"  # keyframe the unscrew sequence moves to first
+TRASH_DROP_POSE = "trash_drop_pose"  # keyframe the full run ends at (cap dropped there), not part of its phase 1
+RETREAT_POSE = "open_bottle_cap_up_pose"  # full run: after unscrewing, rise to this pose's height before the drop
+VIA_POSES = ["safe_bottle_start_pose"]  # full run: then pass through these (move only, cap held) on the way to the drop
 
 st.set_page_config(page_title="Arm Keyframes", page_icon="🦾", layout="wide")
 
@@ -82,6 +90,18 @@ def move(arm, values):
     run(ARMS[arm].move_to_joint_positions(JointPositions(values=values)))
 
 
+def go_to_keyframe(p):
+    bottle_task.go_to_keyframe(run, ARMS[p["arm"]], p)  # joints: joint move; pose: motion planner
+
+
+def keyframe_text(p):
+    if "pose" in p:
+        q = p["pose"]
+        return (f"x {q['x']:.1f}  y {q['y']:.1f}  z {q['z']:.1f}  "
+                f"o ({q['o_x']:.3f}, {q['o_y']:.3f}, {q['o_z']:.3f})  θ {q['theta']:.1f}")
+    return "  ".join(f"{v:7.1f}" for v in p["values"])
+
+
 def apply_gripper(arm, action):
     if action == "grab":
         run(GRIPPERS[arm].grab())
@@ -98,143 +118,37 @@ def safely(fn, *args):
         return False
 
 
-# ---------- cam2 vision ----------
-def capture():
-    """Color (BGR) and depth (uint16 mm, aligned to color when cam2 has align_color_depth) from cam2."""
-    imgs, _ = run(CAMERA.get_images())
-    by_name = {i.name: i for i in imgs}
-    bgr = cv2.imdecode(np.frombuffer(by_name["color"].data, np.uint8), cv2.IMREAD_COLOR)
-    depth = None
-    if "depth" in by_name:  # image/vnd.viam.dep: 8-byte magic, width, height (big-endian u64), then big-endian u16 mm
-        data = by_name["depth"].data
-        w, h = int.from_bytes(data[8:16], "big"), int.from_bytes(data[16:24], "big")
-        depth = np.frombuffer(data[24:], ">u2").reshape(h, w)
-    return bgr, depth
+# ---------- cam2 vision (cap_vision.py) and tracking (cap_tracker.py) ----------
+VISION = (CapVision(run, ROBOT, ARMS[CAM_ARM], CAMERA, INTRINSICS, CAM, CAM_ARM, CAM_GRIPPER)
+          if CAMERA is not None and CAM_ARM in ARMS else None)
 
 
-def circle_features(hsv, edges, u, v, r):
-    """Silver fraction and dark fraction inside the circle, and how much of its outline lies on an edge."""
-    h, w = edges.shape
-    yy, xx = np.ogrid[:h, :w]
-    inner = (xx - u) ** 2 + (yy - v) ** 2 <= (0.8 * r) ** 2
-    sat, val = hsv[..., 1][inner], hsv[..., 2][inner]
-    silver = float(((sat < 50) & (val > 110)).mean())
-    dark = float((val < 70).mean())
-    ang = np.linspace(0, 2 * np.pi, 180, endpoint=False)[:, None]
-    rad = r + np.arange(-4, 5)[None, :]  # tolerate a few px of radius error
-    xs = np.clip((u + rad * np.cos(ang)).astype(int), 0, w - 1)
-    ys = np.clip((v + rad * np.sin(ang)).astype(int), 0, h - 1)
-    rim = float(edges[ys, xs].any(axis=1).mean())
-    return silver, dark, rim
+@st.cache_resource
+def get_tracker():
+    """One tracker thread shared by every browser session, so the toggle always reflects the arm's real state."""
+    return CapTracker(VISION, ARMS[CAM_ARM]) if VISION is not None else None
 
 
-def detect_circles(bgr, min_r, max_r, sensitivity, min_silver, min_rim):
-    """Hough circles split into (caps, rejected), each as (u, v, r, score), caps best first.
-
-    A cap is mostly silver (low saturation, bright), has almost no dark pixels (the dark blue bottle body and
-    neck fail here) and has a crisp outline most of the way round (partial circles inside the cap fail here).
-    Caps whose center falls inside a better cap are duplicates of it and are rejected too."""
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    found = cv2.HoughCircles(cv2.medianBlur(gray, 5), cv2.HOUGH_GRADIENT, dp=1.2, minDist=max(min_r, 40),
-                             param1=120, param2=sensitivity, minRadius=min_r, maxRadius=max_r)
-    if found is None:
-        return [], []
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
-    candidates, rejected = [], []
-    for u, v, r in found[0][:12]:
-        silver, dark, rim = circle_features(hsv, edges, u, v, r)
-        c = (float(u), float(v), float(r), silver * rim)
-        (candidates if silver >= min_silver and dark <= 0.15 and rim >= min_rim else rejected).append(c)
-    caps = []
-    for c in sorted(candidates, key=lambda c: -c[3]):
-        if any((c[0] - k[0]) ** 2 + (c[1] - k[1]) ** 2 < k[2] ** 2 for k in caps):
-            rejected.append(c)
-        else:
-            caps.append(c)
-    return caps, rejected
+TRACKER = get_tracker()
 
 
-def detect_stable(detect, frames=5, min_hits=3):
-    """Best cap over several frames: median of the per-frame winners after dropping ones far from the median,
-    so a single bad frame (blur, a partial circle inside the cap) cannot steer the arm.
-    Returns (bgr, depth, circle, hits) from the last frame with a cap, or None if too few frames agree."""
-    hits, last = [], None
-    for _ in range(frames):
-        bgr, depth = capture()
-        caps, _ = detect_circles(bgr, *detect)
-        if caps:
-            hits.append(caps[0])
-            last = (bgr, depth)
-    if len(hits) < min_hits:
+@st.cache_resource
+def get_unscrewer():
+    if CAM_ARM not in ARMS or CAM_ARM not in GRIPPERS:
         return None
-    arr = np.array(hits)
-    med = np.median(arr, axis=0)
-    agree = arr[np.hypot(arr[:, 0] - med[0], arr[:, 1] - med[1]) < 0.3 * med[2]]
-    if len(agree) < min_hits:
-        return None
-    return (*last, tuple(float(x) for x in np.median(agree, axis=0)), len(agree))
+    return Unscrewer(run, ROBOT, ARMS[CAM_ARM], GRIPPERS[CAM_ARM], CAM_ARM, CAM_GRIPPER)
 
 
-def measure(circle, depth, cap_diameter_mm):
-    """Camera-frame point (mm) of the circle's center. Uses aligned depth when enough of the disk is valid,
-    otherwise falls back to the pinhole size estimate Z = fx * D / (2r) (e.g. cap closer than the D435 min range)."""
-    u, v, r, _ = circle
-    i = INTRINSICS
-    z, method, valid = None, "size", 0.0
-    if depth is not None:
-        h, w = depth.shape
-        yy, xx = np.ogrid[:h, :w]
-        vals = depth[(xx - u) ** 2 + (yy - v) ** 2 <= (0.6 * r) ** 2]
-        valid = float((vals > 0).mean()) if vals.size else 0.0
-        if valid >= 0.6:  # below this the valid pixels are mostly background leaking in at the rim
-            z, method = float(np.median(vals[vals > 0])), "depth"
-    if z is None:
-        z = i.focal_x_px * cap_diameter_mm / (2 * r)
-    x = (u - i.center_x_px) * z / i.focal_x_px
-    y = (v - i.center_y_px) * z / i.focal_y_px
-    return {"x": x, "y": y, "z": z, "method": method, "valid": valid}
+UNSCREWER = get_unscrewer()
 
 
-def to_frame(frame, x=0.0, y=0.0, z=0.0, src=CAM):
-    return run(ROBOT.transform_pose(PoseInFrame(reference_frame=src, pose=Pose(x=x, y=y, z=z, o_z=1)), frame)).pose
+@st.cache_resource
+def get_bottle_task():
+    return BottleTask(run, ARMS, GRIPPERS, UNSCREWER) if UNSCREWER is not None else None
 
 
-def plan_align(point, hover_mm, keep_height):
-    """Arm-base-frame target that puts gripper2 over the circle center (orientation unchanged)."""
-    cap = to_frame(f"{CAM_ARM}_origin", point["x"], point["y"], point["z"])
-    grip = to_frame(f"{CAM_ARM}_origin", src=CAM_GRIPPER)
-    delta = np.array([cap.x - grip.x, cap.y - grip.y, 0.0 if keep_height else cap.z + hover_mm - grip.z])
-    norm = float(np.linalg.norm(delta))
-    clamped = norm > MAX_ALIGN_MM
-    if clamped:
-        delta *= MAX_ALIGN_MM / norm
-    end = run(ARMS[CAM_ARM].get_end_position())
-    target = Pose(x=end.x + delta[0], y=end.y + delta[1], z=end.z + delta[2],
-                  o_x=end.o_x, o_y=end.o_y, o_z=end.o_z, theta=end.theta)
-    return {"cap": cap, "cap_world": to_frame("world", point["x"], point["y"], point["z"]),
-            "grip_world": to_frame("world", src=CAM_GRIPPER), "grip": grip, "delta": delta, "norm": norm,
-            "clamped": clamped, "target": target}
-
-
-def annotate(bgr, circles, rejected=()):
-    out = bgr.copy()
-    cv2.drawMarker(out, (int(INTRINSICS.center_x_px), int(INTRINSICS.center_y_px)), (255, 255, 0),
-                   cv2.MARKER_CROSS, 30, 2)
-    for u, v, r, _ in rejected:
-        cv2.circle(out, (int(u), int(v)), int(r), (0, 0, 255), 1)
-    for n, (u, v, r, _) in enumerate(circles):
-        color = (0, 255, 0) if n == 0 else (160, 160, 160)
-        cv2.circle(out, (int(u), int(v)), int(r), color, 4 if n == 0 else 2)
-        cv2.circle(out, (int(u), int(v)), 4, color, -1)
-    return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
-
-
-def colorize_depth(depth, near=150, far=600):
-    scaled = np.clip((depth.astype(np.int32) - near) * 255 // (far - near), 0, 255).astype(np.uint8)
-    rgb = cv2.cvtColor(cv2.applyColorMap(255 - scaled, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
-    rgb[depth == 0] = 0  # no reading (too close, too far, or specular)
-    return rgb
+BOTTLE_TASK = get_bottle_task()
+FULL_RUNNING = BOTTLE_TASK is not None and BOTTLE_TASK.running
 
 
 # ---------- sidebar ----------
@@ -242,6 +156,12 @@ with st.sidebar:
     st.title("🦾 Arm Keyframes")
     arm = st.selectbox("Active arm", list(ARMS), help="Jog, gripper and Save act on this arm.")
     if st.button("🛑 STOP ALL", type="primary", use_container_width=True):
+        if TRACKER is not None:
+            TRACKER.stop()
+        if BOTTLE_TASK is not None:
+            BOTTLE_TASK.stop()
+        if UNSCREWER is not None:
+            UNSCREWER.stop()
         for a in ARMS.values():
             run(a.stop())
         st.toast("Stopped all arms")
@@ -308,13 +228,21 @@ with save_col:
         )
         delay = st.number_input("Delay after (seconds)", min_value=0.0, max_value=600.0, step=0.5, value=0.0,
                                 help="Pause after this keyframe's move and gripper action, before the next one.")
+        save_as = st.radio("Save as", ["Joints", "XYZ + orientation"], horizontal=True,
+                           help="XYZ + orientation stores the end pose in the arm's base frame and moves there "
+                                "with the motion planner.")
         if st.button(f"💾 Save current pose of {arm}", type="primary", use_container_width=True):
             if not name.strip():
                 st.error("Give the keyframe a name.")
             else:
                 def do_save():
-                    pose = {"name": name.strip(), "arm": arm, "values": joints(arm),
-                            "gripper": "" if g_action == "none" else g_action, "delay": delay}
+                    pose = {"name": name.strip(), "arm": arm}
+                    if save_as == "Joints":
+                        pose["values"] = joints(arm)
+                    else:
+                        e = run(ARMS[arm].get_end_position())
+                        pose["pose"] = {k: round(getattr(e, k), 4) for k in POSE_KEYS}
+                    pose.update({"gripper": "" if g_action == "none" else g_action, "delay": delay})
                     save_poses([p for p in load_poses() if p["name"] != pose["name"]] + [pose])
                 if safely(do_save):
                     st.session_state[f"delay_{name.strip()}"] = delay
@@ -330,7 +258,7 @@ def confirm_go(idx):
     st.caption("Keep the e-stop in reach.")
     if st.button("Yes, move", type="primary"):
         def go():
-            move(p["arm"], p["values"])
+            go_to_keyframe(p)
             apply_gripper(p["arm"], p.get("gripper"))
         with st.spinner("Moving…"):
             ok = safely(go)
@@ -348,7 +276,7 @@ def confirm_run():
         for n, p in enumerate(poses, 1):
             st.write(f"{n}/{len(poses)}: {p['arm']} → {p['name']}")
             def step_fn(p=p):
-                move(p["arm"], p["values"])
+                go_to_keyframe(p)
                 apply_gripper(p["arm"], p.get("gripper"))
             if not safely(step_fn):
                 return
@@ -411,17 +339,17 @@ def confirm_align(settings):
             st.rerun()
         return
     try:
-        found = detect_stable(settings["detect"])
+        found = VISION.detect_stable(settings["detect"])
         if found is None:
             st.error("No cap found consistently across 5 frames. Adjust the detection settings and try again.")
             return
         bgr, depth, circle, hits = found
-        point = measure(circle, depth, settings["cap_d"])
-        plan = plan_align(point, settings["hover"], settings["keep_height"])
+        point = VISION.measure(circle, depth, settings["cap_d"])
+        plan = VISION.plan_align(point, settings["hover"], settings["keep_height"], MAX_ALIGN_MM)
     except Exception as e:
         st.error(str(e))
         return
-    st.image(annotate(bgr, [circle]), use_container_width=True)
+    st.image(VISION.annotate(bgr, [circle], grip_px=VISION.gripper_pixel(point)), use_container_width=True)
     st.caption(f"Cap at ({circle[0]:.0f}, {circle[1]:.0f}) px, r {circle[2]:.0f} px · median of {hits}/5 frames")
     dx, dy, dz = plan["delta"]
     cw, g = plan["cap_world"], plan["grip_world"]
@@ -445,7 +373,7 @@ def confirm_align(settings):
     st.button("Yes, move", type="primary", key="align_yes")
 
 
-if CAMERA is not None and CAM_ARM in ARMS:
+if VISION is not None:
     st.divider()
     st.subheader(f"Camera — {CAM} on {CAM_ARM}")
     feed_col, ctrl_col = st.columns([3, 1])
@@ -456,7 +384,8 @@ if CAMERA is not None and CAM_ARM in ARMS:
             min_r, max_r = st.slider("Radius (px)", 10, 400, (40, 250))
             sensitivity = st.slider("Strictness", 20, 120, 50, help="Hough accumulator threshold; higher finds fewer circles.")
             min_silver = st.slider("Min silver", 0.0, 1.0, 0.5, 0.05,
-                                   help="Share of the circle that is bright and unsaturated. Cap ≈ 0.8, bottle ≈ 0.15.")
+                                   help="Share of the circle that is unsaturated and at least half as bright as the table. "
+                                        "Cap ≈ 0.7–0.8, bottle ≈ 0.15–0.35.")
             min_rim = st.slider("Min outline", 0.0, 1.0, 0.55, 0.05,
                                 help="Share of the circle's outline on an image edge. Cap ≈ 0.7–0.8; partial circles ≈ 0.4.")
             show_rejected = st.toggle("Show rejected circles", value=False)
@@ -464,25 +393,61 @@ if CAMERA is not None and CAM_ARM in ARMS:
                                     help="Used to estimate distance when depth has no reading on the circle.")
         keep_height = st.radio("Align", ["XY only (keep height)", "XY + hover above"], index=0) == "XY only (keep height)"
         hover = st.number_input("Hover above circle (mm)", 20.0, 300.0, 80.0, 5.0, disabled=keep_height)
-        settings = {"detect": (min_r, max_r, sensitivity, min_silver, min_rim),"cap_d": cap_d, "hover": hover, "keep_height": keep_height}
-        if st.button(f"🎯 Align {CAM_ARM} to circle", type="primary", use_container_width=True):
+        settings = {"detect": (min_r, max_r, sensitivity, min_silver, min_rim), "cap_d": cap_d, "hover": hover,
+                    "keep_height": keep_height}
+        unscrewing = (UNSCREWER is not None and UNSCREWER.running) or FULL_RUNNING
+        if st.button(f"🎯 Align {CAM_ARM} to circle", type="primary", use_container_width=True,
+                     disabled=TRACKER.running or unscrewing, help="Not available while tracking or unscrewing."):
             confirm_align(settings)
+
+        st.markdown("**Tracking**")
+        tracking = st.toggle(f"Track cap with {CAM_ARM}", value=TRACKER.running, disabled=unscrewing,
+                             help=f"Slowly follows the cap in XY at the current height (≤{TRACKER.max_step_mm:g} mm "
+                                  f"per {TRACKER.period_s:g} s). Stops when the cap leaves the view and resumes "
+                                  f"when it is back; never goes more than {TRACKER.max_travel_mm:g} mm from where "
+                                  "it started.")
+        if tracking and not TRACKER.running:
+            TRACKER.start(settings["detect"], cap_d)
+        elif not tracking and TRACKER.running:
+            TRACKER.stop()
+        elif TRACKER.running:
+            TRACKER.update(settings["detect"], cap_d)  # detection sliders apply live
+
+        @st.fragment(run_every=1.0)
+        def tracker_status():
+            s = TRACKER.status()
+            if s["state"] == "error":
+                st.error(f"Tracking stopped: {s.get('error')}")
+            elif s["state"] != "off":
+                err = s.get("error_mm")
+                st.caption(f"**{s['state']}** · error {'–' if err is None else f'{err:.1f} mm'} · "
+                           f"{s.get('moves', 0)} moves")
+            if s["state"] in ("off", "error") and TRACKER.running is False and tracking:
+                st.rerun()  # tracker stopped itself: refresh so the toggle shows off
+
+        tracker_status()
 
     @st.fragment(run_every=1.0 if live else None)
     def cam_feed(settings):
         try:
-            bgr, depth = capture()
+            bgr, depth = VISION.capture()
             circles, rejected = detect_circles(bgr, *settings["detect"])
+            # smooth over the last 5 frames so a one-frame misdetection does not make the overlay jump
+            hist = (st.session_state.get("cap_hist", []) + [circles[0] if circles else None])[-5:]
+            st.session_state["cap_hist"] = hist
+            smoothed = robust_median([c for c in hist if c], min_hits=2)
+            circles = [smoothed[0]] + circles[1:] if smoothed else circles
+            p = VISION.measure(circles[0], depth, settings["cap_d"]) if circles else None
+            grip_px = VISION.gripper_pixel(p) if p else None
         except Exception as e:
             st.warning(f"Could not read {CAM}: {e}")
             return
         img_col, depth_col = st.columns(2) if show_depth and depth is not None else (st.container(), None)
-        img_col.image(annotate(bgr, circles, rejected if show_rejected else ()), use_container_width=True)
+        img_col.image(VISION.annotate(bgr, circles, rejected if show_rejected else (), grip_px), use_container_width=True)
         if depth_col is not None:
             depth_col.image(colorize_depth(depth), use_container_width=True, caption="Depth (black = no reading)")
         if circles:
             u, v, r, _ = circles[0]
-            p = measure(circles[0], depth, settings["cap_d"])
             st.caption(f"Circle at ({u:.0f}, {v:.0f}) px, r {r:.0f} px · camera frame x {p['x']:.1f}, "
                        f"y {p['y']:.1f}, z {p['z']:.1f} mm ({'depth' if p['method'] == 'depth' else 'from cap size'}"
                        f", depth valid {p['valid']:.0%}) · {len(rejected)} other circles rejected")
@@ -491,6 +456,142 @@ if CAMERA is not None and CAM_ARM in ARMS:
 
     with feed_col:
         cam_feed(settings)
+
+
+# ---------- unscrew (cap_unscrew.py) ----------
+@st.dialog("Unscrew cap", width="large")
+def confirm_unscrew(params):
+    problem = None if (params.start_joints or params.start_target) else UNSCREWER.check()  # start pose: checked on arrival
+    if problem:
+        st.error(problem)
+        return
+    st.write(f"Run this on **{CAM_ARM}** / **{CAM_GRIPPER}**?")
+    for line in describe(params):
+        st.markdown(f"- {line}")
+    st.caption("The other arm must already be holding the bottle. Keep the e-stop in reach.")
+    if st.button("Yes, unscrew", type="primary"):
+        UNSCREWER.start(params)
+        st.rerun()
+
+
+if UNSCREWER is not None:
+    st.divider()
+    st.subheader(f"Unscrew cap — {CAM_ARM}")
+    busy = UNSCREWER.running or FULL_RUNNING or (TRACKER is not None and TRACKER.running)
+    with st.container(border=True):
+        c1, c2, c3, c4 = st.columns(4)
+        twists = c1.number_input("Twists", 1, 20, 4)
+        twist_deg = c2.number_input("Degrees per twist", 10.0, 170.0, 120.0, 5.0)
+        final_lift = c3.number_input("Final lift (mm)", 0.0, 100.0, 30.0, 5.0,
+                                     help="After the last twist, lift this far while holding the cap; it ends there.")
+        grip_force = c4.number_input("Grip force (%)", 1, 100, 60, 5,
+                                     help="G2 gripper grasp force for every grab; reset to 50% afterwards.")
+        c1, c2, c3, c4 = st.columns(4)
+        speed = c1.number_input("Speed (°/s)", 3.0, 60.0, 60.0, 1.0)
+        release = c2.number_input("Release opening (0–850)", 100, 850, 500, 25,
+                                  help="How far the gripper opens between twists; ~10 units per mm.")
+        direction = c3.selectbox("Direction (seen from above)", ["counter-clockwise (loosen)", "clockwise (tighten)"])
+        starts = [q["name"] for q in load_poses() if q.get("arm", "arm") == CAM_ARM]
+        start_pose = st.selectbox("Start pose", starts + ["(current pose)"],
+                                  index=starts.index(UNSCREW_START_POSE) if UNSCREW_START_POSE in starts else len(starts),
+                                  help=f"{CAM_ARM} keyframe to move to first (gripper open), fingers around the cap.")
+        start_kf = next((q for q in load_poses() if q["name"] == start_pose), {})
+        start_joints = tuple(start_kf.get("values", ()))
+        start_target = tuple(float(start_kf["pose"][k]) for k in POSE_KEYS) if "pose" in start_kf else ()
+        dry_run = c4.toggle("Dry run (no cap)", value=True, help="Full cycle including open/close, but an empty grab "
+                            "is not an error. Use this first, without a cap, to check the wrist turns the right way.")
+        params = UnscrewParams(twists=twists, twist_deg=twist_deg, final_lift_mm=final_lift,
+                               speed_deg_s=speed, release_pos=release, dry_run=dry_run,
+                               start_pose=start_pose if start_kf else "", start_joints=start_joints,
+                               start_target=start_target,
+                               grip_force_pct=int(grip_force),
+                               loosen_sign=-1 if direction.startswith("counter") else 1)
+        b1, b2, _ = st.columns([1, 1, 2])
+        if b1.button("🔓 Unscrew", type="primary", use_container_width=True, disabled=busy):
+            confirm_unscrew(params)
+        if b2.button("⏹ Stop", use_container_width=True, disabled=not UNSCREWER.running):
+            UNSCREWER.stop()
+            st.rerun()
+
+        @st.fragment(run_every=1.0)
+        def unscrew_status():
+            s = UNSCREWER.status()
+            if s["state"] == "running":
+                st.info(f"Running: {s['step']}")
+            elif s["state"] == "done":
+                st.success("Unscrew complete." + (f" ({s['error']})" if s.get("error") else ""))
+            elif s["state"] in ("error", "stopped"):
+                st.error(f"Unscrew {s['state']} at '{s['step']}': {s['error']}")
+
+        unscrew_status()
+
+
+# ---------- full run (bottle_task.py): keyframes -> unscrew -> trash drop ----------
+@st.dialog("Full run", width="large")
+def confirm_full_run(keyframes, params, drop, retreat, via):
+    st.write("Run all three phases, one after another?")
+    st.markdown("**1. Keyframes** (table order)")
+    for kf in keyframes:
+        st.markdown(f"- {kf['arm']} → **{kf['name']}**" + (f", then gripper {kf['gripper']}" if kf.get("gripper") else "")
+                    + (f", wait {kf['delay']:g} s" if kf.get("delay") else ""))
+    st.markdown(f"**2. Unscrew** ({CAM_ARM}, settings from the Unscrew panel)")
+    for line in describe(params):
+        st.markdown(f"- {line}")
+    st.markdown("**3. Retreat and drop**")
+    if retreat is not None:
+        st.markdown(f"- {retreat['arm']} straight up to **{retreat['name']}**'s height, holding the cap "
+                    "(orientation kept as the unscrew left it; gripper unchanged)")
+    for kf in via:
+        st.markdown(f"- {kf['arm']} → **{kf['name']}** holding the cap (move only; gripper unchanged)")
+    st.markdown(f"- {drop['arm']} → **{drop['name']}**" + (f", then gripper {drop['gripper']}" if drop.get("gripper") else ""))
+    if params.dry_run:
+        st.warning("Unscrew is in dry-run mode (empty grabs allowed). Turn it off in the Unscrew panel for a real cap.")
+    st.caption("The other arm must be holding the bottle by phase 2. Keep the e-stop in reach; STOP ALL or Stop "
+               "halts every phase.")
+    if st.button("Yes, run all", type="primary"):
+        BOTTLE_TASK.start(keyframes, params, drop, retreat, via)
+        st.rerun()
+
+
+if BOTTLE_TASK is not None:
+    st.divider()
+    st.subheader("Full run — keyframes → unscrew → retreat → trash drop")
+    all_kf = load_poses()
+    drop_kf = next((k for k in all_kf if k["name"] == TRASH_DROP_POSE), None)
+    pre_kf = [k for k in all_kf if k["name"] != TRASH_DROP_POSE]
+    retreat_kf = next((k for k in all_kf if k["name"] == RETREAT_POSE), None)
+    via_kf = [k for name in VIA_POSES for k in all_kf if k["name"] == name]
+    with st.container(border=True):
+        if drop_kf is None:
+            st.warning(f"Save a keyframe named `{TRASH_DROP_POSE}` (where the cap is dropped) to enable the full run.")
+        else:
+            st.caption(f"1. Keyframes: {' → '.join(k['name'] for k in pre_kf) or '(none)'} · "
+                       f"2. Unscrew with the settings above (start **{params.start_pose or 'current pose'}**, "
+                       f"{'dry run' if params.dry_run else 'real cap'}) · "
+                       + (f"3. straight up to **{RETREAT_POSE}**'s height holding the cap, then " if retreat_kf else "3. ")
+                       + "".join(f"via **{k['name']}**, then " for k in via_kf)
+                       + f"{drop_kf['arm']} to **{TRASH_DROP_POSE}**, then gripper {drop_kf.get('gripper') or 'unchanged'}.")
+        f1, f2, _ = st.columns([1, 1, 2])
+        if f1.button("▶ Full run", type="primary", use_container_width=True,
+                     disabled=drop_kf is None or busy or FULL_RUNNING):
+            confirm_full_run(pre_kf, params, drop_kf, retreat_kf, via_kf)
+        if f2.button("⏹ Stop full run", use_container_width=True, disabled=not FULL_RUNNING):
+            BOTTLE_TASK.stop()
+            st.rerun()
+
+        @st.fragment(run_every=1.0)
+        def full_run_status():
+            s = BOTTLE_TASK.status()
+            if s["state"] == "running":
+                st.info(f"Running: {s['step']}")
+            elif s["state"] == "done":
+                st.success("Full run complete.")
+            elif s["state"] in ("error", "stopped"):
+                st.error(f"Full run {s['state']} at '{s['step']}': {s['error']}")
+            if s["state"] != "running" and FULL_RUNNING:
+                st.rerun()  # finished: refresh so the buttons unlock
+
+        full_run_status()
 
 
 # ---------- keyframe table ----------
@@ -518,7 +619,7 @@ else:
         row[0].write(i + 1)
         row[1].write(p["name"])
         row[2].write(p.get("arm", "arm"))
-        row[3].code("  ".join(f"{v:7.1f}" for v in p["values"]), language=None)
+        row[3].code(keyframe_text(p), language=None)
         row[4].write(p.get("gripper") or "–")
         row[5].number_input(
             "Delay after (s)", min_value=0.0, max_value=600.0, step=0.5, value=float(p.get("delay", 0.0)),
@@ -543,12 +644,13 @@ else:
     st.caption(f"Total programmed delay: {sum(q.get('delay', 0.0) for q in poses[:-1]):g} s "
                "(the last keyframe's delay is ignored)")
     run_c, _ = st.columns([1, 3])
-    if run_c.button("▶ Run sequence", type="primary", use_container_width=True):
+    if run_c.button("▶ Run sequence", type="primary", use_container_width=True, disabled=FULL_RUNNING):
         confirm_run()
 
     with st.expander("Export as Python"):
         lines = ["POSES = {"]
         for p in poses:
-            lines.append(f"    {p['name']!r}: ({p.get('arm', 'arm')!r}, {[round(v, 3) for v in p['values']]}, {p.get('delay', 0.0):g}),")
+            target = p["pose"] if "pose" in p else [round(v, 3) for v in p["values"]]
+            lines.append(f"    {p['name']!r}: ({p.get('arm', 'arm')!r}, {target}, {p.get('delay', 0.0):g}),")
         lines.append("}")
         st.code("\n".join(lines), language="python")
