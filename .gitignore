@@ -1,0 +1,4 @@
+env.sh
+.venv/
+poses.json
+__pycache__/
