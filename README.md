@@ -6,6 +6,8 @@ other unscrews the cap.
 
 It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam machine (`armfarm16`).
 
+Picking up the bottle-stabilizer (`arm`) work? Start with [`HANDOFF.md`](HANDOFF.md).
+
 ## Features
 
 - Live joint angles (Joint 0–5, matching the Viam app) and end-effector pose, refreshed every second
