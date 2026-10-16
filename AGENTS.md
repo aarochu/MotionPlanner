@@ -15,7 +15,7 @@ A two-arm bottle opener built on Viam. The bottle is a Saratoga 28 fl oz cobalt-
   the table, and holds it steady.
 - **`arm2`** (Rishi): unscrews the cap while `arm` holds the bottle.
 
-Everything is **hardcoded**: taught joint-space keyframes replayed in order. There is no learned policy (no
+Everything is **hardcoded**: taught keyframes (XYZ + orientation) replayed in order through the motion planner. There is no learned policy (no
 VLA). Cameras are used only to measure where the bottle or cap is, so the taught motion can be shifted slightly.
 
 ## 2. Hardware and Viam setup
@@ -56,7 +56,8 @@ Arm settings (both): `speed_degs_per_sec: 60` (module default), acceleration at 
 | `import_poses.py` | CLI to add keyframes from another poses file after the existing ones |
 | `cap_vision.py` | Rishi's cap detection for `cam2` (`circle_features`, `detect_circles` are imported by the dashboard) |
 | `cap_unscrew.py` | `arm2` regrasp unscrew sequence (thread), grip force/speed, tool levelling |
-| `bottle_task.py` | Full run (thread): both arms' keyframes → unscrew → retreat → via → trash drop; shared `go_to_keyframe` |
+| `bottle_task.py` | Full run (thread): both arms' keyframes → unscrew → retreat → via → trash drop; `Mover`: every keyframe move via the motion service |
+| `kinematics.py` | Forward kinematics from the arm's own model: joint angles → end pose (no movement) |
 | `cap_tracker.py` | Slow XY cap tracking for `arm2`; not wired into this GUI |
 | `poses.json` | Saved keyframes, grouped by arm (§5) |
 | `vision_config.json` | Saved pink-detection settings (loaded on start; **Save as default** writes it) |
@@ -83,15 +84,17 @@ The sidebar's **Active arm** chooses which arm the jog/gripper/save controls and
  "play_order": [{"arm": "arm", "name": "parking"}, ...]}
 ```
 
-Current `arm` keyframes:
+Current `arm` keyframes. Also **XYZ + orientation** (in `arm`'s base frame = world). They were taught as joints
+(in parentheses, for reference) and converted with the arm's own kinematics model (`kinematics.py`; checked
+against `get_end_position` at `end` and `NewMid` to < 0.3 mm):
 
-| Keyframe | Joints 0–5 (°) | Gripper | Role |
-|---|---|---|---|
-| `parking` | −34.8, −75.8, −2.9, 164.9, 9.4, 194.1 | open | Rest; camera sees the whole bottle (parking scan) |
-| `NewMid` | −64.7, 11.8, −54.1, 107.2, 72.4, 218.7 | – | Scan pose for the corrected grab |
-| `grab_pos` | −49.3, 22.0, −70.6, 117.0, 58.7, 222.2 | grab | Grabs the bottle |
-| `grabframe1` | −50.7, 6.0, −68.7, 110.5, 58.6, 236.9 | – | After the grab |
-| `end` | −117.6, 27.5, −43.9, 94.1, 88.6, 199.4 | – | Holds the bottle on the table (no gripper action, so it keeps holding) |
+| Keyframe | x, y, z (mm) | Orientation (o_x, o_y, o_z, θ) | Gripper | Role (taught joints 0–5, °) |
+|---|---|---|---|---|
+| `parking` | 141.6, −117.4, 320.7 | 0.844, −0.536, −0.038, −0.70 | open | Rest; camera sees the whole bottle (−34.8, −75.8, −2.9, 164.9, 9.4, 194.1) |
+| `NewMid` | 266.2, −407.6, 272.2 | 0.999, 0.017, −0.033, −1.41 | – | Scan pose for the corrected grab (−64.7, 11.8, −54.1, 107.2, 72.4, 218.7) |
+| `grab_pos` | 397.2, −402.2, 280.9 | 0.999, 0.007, −0.053, 0.21 | grab | Grabs the bottle (−49.3, 22.0, −70.6, 117.0, 58.7, 222.2) |
+| `grabframe1` | 368.7, −386.1, 416.6 | 0.999, 0.043, 0.027, 0.56 | – | After the grab (−50.7, 6.0, −68.7, 110.5, 58.6, 236.9) |
+| `end` | −91.2, −379.4, 114.5 | 0.849, −0.529, −0.003, 3.12 | – | Holds the bottle on the table, keeps holding (−117.6, 27.5, −43.9, 94.1, 88.6, 199.4) |
 
 Current `arm2` keyframes (Rishi's). They are **XYZ + orientation** keyframes (`"pose"`: x, y, z mm and orientation
 vector o_x, o_y, o_z, θ, in `arm2`'s base frame), reached with the motion planner:
@@ -103,15 +106,23 @@ vector o_x, o_y, o_z, θ, in `arm2`'s base frame), reached with the motion plann
 | `open_bottle_cap_pose` | 33.7, 447.0, 470.9 | 0.000, 0.003, −1.000, −88.2 | open | Fingers around the cap; unscrew start |
 | `trash_drop_pose` | 435.0, −66.0, 140.0 | 0.000, −1.000, 0.000, 0.04 | open | Where the cap is dropped |
 
-Joint keyframes (`"values"`) are joint-space moves (`move_to_joint_positions`): repeatable, and the planner cannot
-choose a surprising path. Pose keyframes go through the motion planner (exact pose, path and arm configuration
-chosen by the planner). **Save as** picks the type when saving. Each keyframe can have a gripper action
+**Every keyframe move goes through the motion service** (`bottle_task.Mover`, `motion.move` on `builtin`), which
+plans around the configured obstacles (`table`, walls, `ceiling`, `box-shelf`) and the other arm where it stands.
+`arm.move_to_position` is not used for keyframes: it only checks the arm against itself. A joint keyframe
+(`"values"`, still possible with **Save as**) is converted to its end pose and planned the same way; nothing is
+replayed as a raw joint move. If no collision-free path exists the move raises and the arm stays put (in a full
+run, the run stops). The planner picks the path and arm configuration, so the joints at a keyframe can differ from
+the taught ones; "at keyframe" checks for pose keyframes compare the end pose (≤ 2 mm, ≤ 1°). The planner sees the
+other arm where it stands, so the arms move one at a time and the plan is exact for arm vs arm. The motion service
+plans one move at a time (a second request while one runs gets "context canceled"), so `Mover` serializes them with
+a lock. Not planned: jog buttons, and the unscrew's own small moves (levelling,
+Joint 5 twists, the 30 mm lift). Corrected grab and Align go through the motion service too. Each keyframe can have a gripper action
 (grab/open) and a delay after it.
 
 **Full run** (`bottle_task.py`, panel above the keyframe table): (1) the "arm, then arm2" keyframes except
-`trash_drop_pose`; `arm2` starts moving to `safe_bottle_start_pose` together with `arm`'s first keyframe (`parking`,
-which now opens `arm`'s gripper); `arm` waits at `parking` until `arm2` has arrived, so that start is the only time
-both arms move; (2) the unscrew with the Unscrew panel's settings; (3) straight up to `open_bottle_cap_up_pose`'s
+`trash_drop_pose`, except that `arm2` goes to `safe_bottle_start_pose` first (`ARM2_FIRST_POSE`, out of `arm`'s
+way) and then `arm` starts at `parking` (which opens `arm`'s gripper); one arm moves at a time throughout. (A
+simultaneous start was tried on 2026-10-16 and dropped: two planned moves at once cancel each other); (2) the unscrew with the Unscrew panel's settings; (3) straight up to `open_bottle_cap_up_pose`'s
 height holding the cap (orientation kept), via `safe_bottle_start_pose` (move only), then `trash_drop_pose` + open.
 Names are code constants `UNSCREW_START_POSE`, `RETREAT_POSE`, `VIA_POSES`, `TRASH_DROP_POSE`. A failed step or
 Stop/STOP ALL halts both arms and skips the drop.
@@ -134,7 +145,7 @@ Hough circles filtered for a silver cap (silver share, few dark pixels, crisp ou
 judged relative to the white table's brightness in the same frame (fixed thresholds failed when the cap was in
 shade at the unscrew pose); median over 5 frames;
 distance from aligned depth if ≥ 60% of a center disk is valid, else from cap size (`Z = fx·D/2r`, D = cap
-diameter). **Align** moves `arm2` so `gripper2` is over the cap with `move_to_position`, max 100 mm per press,
+diameter). **Align** moves `arm2` so `gripper2` is over the cap with the motion service, max 100 mm per press,
 after a confirmation.
 
 ### `arm` (Aaron's logic, `vision.py`)
@@ -160,15 +171,16 @@ size fallback is acceptable.
   `grab_pos` → **Record grab pose** (stores the end-effector pose). Saved to `grab_reference.json`.
 - Run: **Scan at parking** (read-only; bottle present and ≤ 50 mm off) → Go `NewMid` → **Corrected grab** →
   confirm. Moves to a pre-grab point 60 mm back along the approach, then straight in to the corrected grab
-  (`move_to_position`, orientation and height kept), then grabs.
-- Gates (nothing moves): arm not within 1° of `NewMid`; marker not found consistently; correction > 30 mm;
+  (motion service, orientation and height kept), then grabs.
+- Gates (nothing moves): arm not within 2 mm / 1° of `NewMid`; marker not found consistently; correction > 30 mm;
   parking and `NewMid` offsets disagree by > 15 mm.
 - Keyframe names are coupled to code constants `SCAN_KEYFRAME`, `GRAB_KEYFRAME`, `PARK_KEYFRAME`.
 
 ## 7. Decisions and history (why things are the way they are)
 
-- **Joint-space keyframes, not Cartesian/planner moves,** for repeatability. Cartesian `move_to_position` is used
-  only for small, vision-derived corrections (Rishi's Align, Aaron's corrected grab).
+- **Keyframes were joint-space at first** (repeatable, no surprising planner paths). On 2026-10-16 both arms
+  switched to XYZ + orientation keyframes moved with the motion service, so every move is collision-checked
+  against the obstacles and the other arm (joint moves skip all checks).
 - **Marker evolution:** blue mesh tape → rejected (same blue as the table tape and the bottle glass); pink note →
   clean single blob; black dot added for a sharp aim point. A single note on a cylinder shifts its centroid up to
   one radius when the bottle rotates; a full pink band around the bottle would avoid that (not done).

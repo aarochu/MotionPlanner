@@ -5,19 +5,51 @@ waits for the previous one to finish; if any step fails or is stopped, the arms 
 """
 import threading
 
-from viam.components.arm import JointPositions
-from viam.proto.common import Pose
+from viam.proto.common import Pose, PoseInFrame
+from viam.services.motion import MotionClient
+
+from kinematics import Kinematics
 
 POSE_KEYS = ("x", "y", "z", "o_x", "o_y", "o_z", "theta")
 
 
-def go_to_keyframe(run, arm, kf):
-    """Joint keyframes ("values") move in joint space. XYZ keyframes ("pose": x, y, z in mm and the orientation
-    vector o_x, o_y, o_z, theta, in the arm's base frame as get_end_position reports) go through the motion planner."""
-    if "pose" in kf:
-        run(arm.move_to_position(Pose(**{k: float(kf["pose"][k]) for k in POSE_KEYS})))
-    else:
-        run(arm.move_to_joint_positions(JointPositions(values=kf["values"])))
+class Mover:
+    """Every keyframe move goes through the motion service, which plans around the obstacles in the machine
+    config (table, walls, ceiling, box-shelf) and the other arm where it stands, instead of the arm's own
+    move_to_position (self-collision only) or a joint move (no checks at all).
+
+    XYZ keyframes ("pose": x, y, z in mm and the orientation vector o_x, o_y, o_z, theta, in the arm's base frame
+    as get_end_position reports) are the target as is. Joint keyframes ("values") are converted to the end pose
+    those joints give (forward kinematics) and planned the same way. If no collision-free path is found, the
+    move raises and the arm does not move."""
+
+    def __init__(self, run, robot, arms, motion="builtin"):
+        self.run, self.arms = run, arms
+        self.motion = MotionClient.from_robot(robot, motion)
+        self._kin = {}
+        self._lock = threading.Lock()  # one planned move at a time: a second Move would cancel the first
+
+    def kinematics(self, arm_name):
+        if arm_name not in self._kin:
+            self._kin[arm_name] = Kinematics.from_arm(self.run, self.arms[arm_name])
+        return self._kin[arm_name]
+
+    def target(self, kf):
+        """The keyframe's end pose (dict of POSE_KEYS) in its arm's base frame."""
+        if "pose" in kf:
+            return {k: float(kf["pose"][k]) for k in POSE_KEYS}
+        return self.kinematics(kf["arm"]).end_pose(kf["values"])
+
+    def to_pose(self, arm_name, pose):
+        """Plan and move arm_name's end to pose (Pose or dict, in its base frame), collision-checked."""
+        if isinstance(pose, dict):
+            pose = Pose(**pose)
+        dest = PoseInFrame(reference_frame=f"{arm_name}_origin", pose=pose)
+        with self._lock:
+            self.run(self.motion.move(component_name=arm_name, destination=dest))
+
+    def go(self, kf):
+        self.to_pose(kf["arm"], self.target(kf))
 
 
 def apply_gripper(run, gripper, action):
@@ -28,8 +60,8 @@ def apply_gripper(run, gripper, action):
 
 
 class BottleTask:
-    def __init__(self, run, arms, grippers, unscrewer):
-        self.run, self.arms, self.grippers, self.unscrewer = run, arms, grippers, unscrewer
+    def __init__(self, run, arms, grippers, unscrewer, mover):
+        self.run, self.arms, self.grippers, self.unscrewer, self.mover = run, arms, grippers, unscrewer, mover
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -43,20 +75,18 @@ class BottleTask:
         with self._lock:
             return dict(self._status)
 
-    def start(self, keyframes, unscrew_params, drop, retreat=None, via=(), alongside=None):
+    def start(self, keyframes, unscrew_params, drop, retreat=None, via=()):
         """keyframes: played in order first; unscrew_params: UnscrewParams; retreat: optional keyframe whose height
         the arm rises to right after the unscrew, straight up and keeping its current orientation (the wrist stays
         where the last twist left it; the keyframe's gripper action is skipped so the cap stays held); drop: the
         trash keyframe, played last. via: keyframes passed through between the retreat and the drop, motion only
-        (their gripper actions and delays are skipped, so the cap stays held). alongside: optional keyframe for
-        another arm, started at the same time as the first keyframe (e.g. arm2 to its start while arm goes to
-        parking). After that first keyframe the run waits until the alongside move has finished too, so from then
-        on only one arm moves at a time."""
+        (their gripper actions and delays are skipped, so the cap stays held). One arm moves at a time: the
+        motion service plans one move at a time, and each plan only sees the other arm standing still."""
         if self.running:
             return
         self._stop.clear()
         self._set(state="running", step="starting", error=None)
-        self._thread = threading.Thread(target=self._sequence, args=(list(keyframes), unscrew_params, drop, retreat, list(via), alongside),
+        self._thread = threading.Thread(target=self._sequence, args=(list(keyframes), unscrew_params, drop, retreat, list(via)),
                                         name="bottle-task", daemon=True)
         self._thread.start()
 
@@ -88,7 +118,7 @@ class BottleTask:
     def _keyframe(self, label, kf, move_only=False):
         self._check()
         self._set(step=f"{label}: moving {kf['arm']} to {kf['name']}")
-        go_to_keyframe(self.run, self.arms[kf["arm"]], kf)
+        self.mover.go(kf)
         if move_only:
             return
         if kf.get("gripper"):
@@ -103,50 +133,17 @@ class BottleTask:
         self._check()
         arm = self.arms[kf["arm"]]
         e = self.run(arm.get_end_position())
-        z = float(kf["pose"]["z"]) if "pose" in kf else None
-        if z is None or z <= e.z:
-            return  # joint keyframe (no height to read) or already at/above it
+        z = self.mover.target(kf)["z"]
+        if z <= e.z:
+            return  # already at/above it
         self._set(step=f"3/3 retreat: {kf['arm']} up {z - e.z:.0f} mm to {kf['name']} height, holding the cap")
         target = Pose(x=e.x, y=e.y, z=z, o_x=e.o_x, o_y=e.o_y, o_z=e.o_z, theta=e.theta)
-        self.run(arm.move_to_position(target))
+        self.mover.to_pose(kf["arm"], target)
 
-    def _move_and_grip(self, kf, errors):
-        """For the alongside move's thread: move + gripper action, recording any failure for the main thread."""
-        try:
-            go_to_keyframe(self.run, self.arms[kf["arm"]], kf)
-            if kf.get("gripper") and not self._stop.is_set():
-                apply_gripper(self.run, self.grippers[kf["arm"]], kf["gripper"])
-        except Exception as e:
-            errors.append(e)
-
-    def _sequence(self, keyframes, unscrew_params, drop, retreat, via, alongside):
-        side, errors = None, []
-
-        def wait_for_side(reason):
-            nonlocal side
-            if side is not None:
-                if side.is_alive():
-                    self._set(step=f"waiting for {alongside['arm']} to reach {alongside['name']} ({reason})")
-                side.join()
-                side = None
-            if errors:
-                raise RuntimeError(f"{alongside['arm']} to {alongside['name']}: {errors[0]}")
-
+    def _sequence(self, keyframes, unscrew_params, drop, retreat, via):
         try:
             for n, kf in enumerate(keyframes, 1):
-                label = f"1/3 keyframes {n}/{len(keyframes)}"
-                if n == 1 and alongside is not None:
-                    self._check()
-                    side = threading.Thread(target=self._move_and_grip, args=(alongside, errors), daemon=True)
-                    side.start()  # e.g. arm2 heads to its start pose while arm runs its sequence
-                    label += f" (and {alongside['arm']} → {alongside['name']})"
-                elif alongside is not None and kf["arm"] == alongside["arm"]:
-                    wait_for_side(f"before its {kf['name']}")
-                self._keyframe(label, kf)
-                if n == 1:
-                    wait_for_side(f"{kf['arm']} waits at {kf['name']}")  # nothing else moves until both have arrived
-            if alongside is not None:
-                wait_for_side("before the unscrew")
+                self._keyframe(f"1/3 keyframes {n}/{len(keyframes)}", kf)
 
             self._check()
             self.unscrewer.start(unscrew_params)
@@ -166,6 +163,4 @@ class BottleTask:
             self._set(state="done", step="complete")
         except Exception as e:
             self._halt()
-            if side is not None:
-                side.join(timeout=10)
             self._set(state="stopped" if isinstance(e, InterruptedError) else "error", error=str(e))

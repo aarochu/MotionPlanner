@@ -1,6 +1,6 @@
 # MotionPlanner
 
-A Streamlit dashboard for teaching and replaying hardcoded joint-space keyframes on Viam-controlled
+A Streamlit dashboard for teaching and replaying hardcoded keyframes (XYZ + orientation, collision-checked by the motion planner) on Viam-controlled
 xArm6 robot arms. It was built for a two-arm bottle-opening project: one arm holds the bottle while the
 other unscrews the cap.
 
@@ -97,14 +97,14 @@ The offset is relative to the reference, taken from the same pose with the same 
 cancels out, even with the marker-size distance fallback. Nothing moves if the marker isn't found
 consistently, if the arm isn't at `NewMid`, or if the correction is over 30 mm (`MAX_GRAB_FIX_MM`).
 
-Moves are joint-space (`move_to_joint_positions`), so they are repeatable and the motion planner
-cannot pick a surprising path.
+Every keyframe move (both arms) goes through Viam's motion service, which plans a path around the obstacles in the
+machine config and the other arm. If it finds no collision-free path, the arm does not move.
 
 ## Full run (both arms)
 
-**Full run** plays, one after another. The arms move one at a time, except at the start: `arm2` moves to
-`safe_bottle_start_pose` (`ALONGSIDE_POSE`) together with `arm`'s move to `parking`; `arm` then waits at `parking`
-until `arm2` has arrived before continuing (and `arm2` skips that keyframe in its own part):
+**Full run** plays, one after another, one arm at a time. It starts with `arm2` moving to `safe_bottle_start_pose`
+(`ARM2_FIRST_POSE`) out of `arm`'s way; then `arm`'s sequence from `parking` (and `arm2` skips that keyframe in its
+own part):
 
 1. **Keyframes:** every `arm` keyframe (Aaron's sequence: `parking` → `NewMid` → `grab_pos` → `grabframe1` → `end`,
    which ends holding the bottle), then every `arm2` keyframe except `trash_drop_pose`
@@ -118,9 +118,10 @@ until `arm2` has arrived before continuing (and `arm2` skips that keyframe in it
 Any failure, **Stop full run** or STOP ALL ends the run where it is and stops the arms; it never continues to the
 drop after a failed unscrew. A confirmation lists every step of all three phases first.
 
-Keyframes can be joints (`"values": [j0..j5]`, joint-space move) or a pose (`"pose": {"x", "y", "z", "o_x", "o_y",
-"o_z", "theta"}` in mm / orientation vector, in the arm's base frame as `get_end_position` reports; moved to with the
-motion planner). Choose with **Save as** when saving. The `arm2` keyframes are poses. Note the Viam app's arm card
+Keyframes are poses (`"pose": {"x", "y", "z", "o_x", "o_y", "o_z", "theta"}` in mm / orientation vector, in the arm's
+base frame as `get_end_position` reports) or joints (`"values": [j0..j5]`), chosen with **Save as**. Both kinds are
+moved to with the motion service (a joint keyframe is first converted to its end pose with `kinematics.py`). All
+current keyframes, for both arms, are poses. Note the Viam app's arm card
 shows world coordinates; for `arm2` (base at world y = −914 mm) the world Y is 914 mm lower than the base-frame Y.
 
 Known issue: the planner has rejected the move to `trash_drop_pose` (its collision model reports `arm2`'s wrist
