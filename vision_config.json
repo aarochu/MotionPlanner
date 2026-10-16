@@ -11,5 +11,11 @@
   "plane_z": -97.0,
   "min_rect": 0.8,
   "max_aspect": 1.6,
-  "use_shape": false
+  "use_shape": false,
+  "marker_h": 76.0,
+  "min_valid": 0.6,
+  "max_spread": 40.0,
+  "use_dot": true,
+  "dot_v_max": 90,
+  "dot_min_area": 20
 }

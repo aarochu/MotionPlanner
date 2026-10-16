@@ -20,6 +20,11 @@ DEFAULTS = {
     "use_shape": False, "min_rect": 0.8, "max_aspect": 1.6,
     # position
     "method": METHODS[0], "radius": 40.0, "depth_lo": 200, "depth_hi": 1500, "plane_z": -97.0,
+    # depth is trusted only if enough of the marker reads and the readings agree; otherwise fall back to the
+    # marker's known height (it runs along the bottle's axis, so the bottle's curve and rotation don't shrink it)
+    "marker_h": 76.0, "min_valid": 0.6, "max_spread": 40.0,
+    # black dot drawn in the middle of the marker: a sharp aim point (the marker's height still gives distance)
+    "use_dot": True, "dot_v_max": 90, "dot_min_area": 20,
 }
 
 
@@ -39,7 +44,9 @@ def load_config(path):
 
 
 def save_config(path, cfg):
-    Path(path).write_text(json.dumps({k: cfg[k] for k in DEFAULTS}, indent=2) + "\n")
+    """Write every known setting: the ones given here win, the rest keep their saved (or default) value."""
+    current = load_config(path)
+    Path(path).write_text(json.dumps({k: cfg.get(k, current[k]) for k in DEFAULTS}, indent=2) + "\n")
 
 
 # ---------- capture ----------
@@ -141,7 +148,29 @@ def detect(bgr, cfg):
         filled = np.zeros(mask.shape, np.uint8)
         cv2.drawContours(filled, [best["contour"]], -1, 255, -1)
         best["filled"] = filled
+        if cfg.get("use_dot", True):
+            find_center_dot(bgr, mask, best, cfg)
     return mask, best, candidates
+
+
+def find_center_dot(bgr, mask, det, cfg):
+    """Dark dot inside the marker (inside its outline, not pink, and dark). If found near the middle, it becomes
+    the aim point det["px"]; the pink centroid is kept as det["px_pink"]."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    hole = ((det["filled"] > 0) & (mask == 0) & (hsv[..., 2] <= cfg.get("dot_v_max", 90))).astype(np.uint8)
+    n, _, stats, cents = cv2.connectedComponentsWithStats(hole)
+    x, y, w, h = det["bbox"]
+    best = None
+    for k in range(1, n):
+        area = stats[k, cv2.CC_STAT_AREA]
+        cx, cy = cents[k]
+        middle = abs(cx - (x + w / 2)) <= 0.25 * w and abs(cy - (y + h / 2)) <= 0.25 * h
+        if area >= cfg.get("dot_min_area", 20) and middle and (best is None or area > best[0]):
+            best = (area, (float(cx), float(cy)), (int(stats[k, cv2.CC_STAT_WIDTH]), int(stats[k, cv2.CC_STAT_HEIGHT])))
+    det["px_pink"] = det["px"]
+    if best is not None:
+        det["dot"] = {"px": best[1], "size": best[2], "area": int(best[0])}
+        det["px"] = best[1]
 
 
 def draw_detections(bgr, best, candidates):
@@ -155,6 +184,8 @@ def draw_detections(bgr, best, candidates):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
     if best is not None:
         cv2.drawMarker(out, (int(best["px"][0]), int(best["px"][1])), (0, 0, 255), cv2.MARKER_CROSS, 40, 3)
+        if "dot" in best:   # aim point is the black dot
+            cv2.circle(out, (int(best["px"][0]), int(best["px"][1])), 14, (255, 0, 255), 2)
     return out
 
 
@@ -173,31 +204,67 @@ def pixel_to_world(cap, u, v, plane_z):
     return cap["origin"] + t * ray, note
 
 
-def depth_to_world(cap, det, radius, d_lo, d_hi):
-    """Median depth over the detected target -> bottle axis position in world (mm).
+def _surface_to_world(cap, det, z, radius):
+    """Marker center at distance z along its pixel ray -> bottle axis point in world (one radius further in)."""
+    u, v = det["px"]
+    surface = np.array([(u - cap["cx"]) / cap["fx"] * z, (v - cap["cy"]) / cap["fy"] * z, z])
+    axis = surface + radius * surface / np.linalg.norm(surface)
+    return cap["origin"] + cap["R"] @ axis
 
-    The target is the bottle's front surface, so the axis lies about one bottle radius further along the ray."""
+
+def depth_stats(cap, det, d_lo, d_hi):
+    """Depth readings on the marker's interior (edges shrunk in, so background at the rim doesn't leak in)."""
     depth = cap.get("depth")
     if depth is None:
-        return None, None, "This capture has no depth frame."
-    on_blob = det["filled"] > 0
-    ok = on_blob & (depth > 0) & (depth < 65535) & (depth >= d_lo) & (depth <= d_hi)
+        return {"n": 0, "valid_frac": 0.0}
+    _, _, w, h = det["bbox"]
+    k = max(3, int(0.15 * min(w, h)))
+    inner = cv2.erode(det["filled"], np.ones((k, k), np.uint8)) > 0
+    if not inner.any():
+        inner = det["filled"] > 0
+    ok = inner & (depth > 0) & (depth < 65535) & (depth >= d_lo) & (depth <= d_hi)
     vals = depth[ok].astype(float)
-    stats = {"n": int(vals.size), "valid_frac": vals.size / max(int(on_blob.sum()), 1)}
-    if vals.size < 50:
-        return None, stats, ("Too few valid depth pixels on the target. Move the camera back (the sensor can't read "
-                             "very close surfaces) or widen the valid depth range.")
-    d = float(np.median(vals))
-    stats.update(median=d, spread=float(np.percentile(vals, 75) - np.percentile(vals, 25)))
-    u, v = det["px"]
-    surface = np.array([(u - cap["cx"]) / cap["fx"] * d, (v - cap["cy"]) / cap["fy"] * d, d])
-    axis = surface + radius * surface / np.linalg.norm(surface)
-    note = ""
-    if stats["valid_frac"] < 0.3:
-        note = "Less than 30% of the target has valid depth, so the distance may be unreliable."
-    elif stats["spread"] > 40:
-        note = "Depth varies a lot across the target (spread > 40 mm), so part of it may be reading the background."
-    return cap["origin"] + cap["R"] @ axis, stats, note
+    stats = {"n": int(vals.size), "valid_frac": vals.size / max(int(inner.sum()), 1)}
+    if vals.size:
+        stats.update(median=float(np.median(vals)),
+                     spread=float(np.percentile(vals, 75) - np.percentile(vals, 25)))
+    return stats
+
+
+def depth_to_world(cap, det, radius, d_lo, d_hi):
+    """Median depth over the marker -> bottle axis position in world (mm). No quality gate; see locate()."""
+    stats = depth_stats(cap, det, d_lo, d_hi)
+    if "median" not in stats:
+        return None, stats, "No valid depth on the marker."
+    return _surface_to_world(cap, det, stats["median"], radius), stats, ""
+
+
+def size_to_world(cap, det, marker_h, radius):
+    """Distance from the marker's apparent height: Z = fy * H / h_px (same idea as the cap-size fallback)."""
+    h_px = det["bbox"][3]
+    z = cap["fy"] * marker_h / h_px
+    return _surface_to_world(cap, det, z, radius), z
+
+
+def locate(cap, det, cfg):
+    """World position of the bottle axis from one capture.
+
+    Returns (world, info). info["method"] is "depth", "size" (depth failed its quality check) or "plane";
+    info["note"] explains a fallback or a weak result; info["stats"] holds the depth readings when used."""
+    if cfg["method"] == METHODS[1]:
+        world, note = pixel_to_world(cap, *det["px"], cfg["plane_z"])
+        return world, {"method": "plane", "note": note, "stats": None}
+    stats = depth_stats(cap, det, cfg["depth_lo"], cfg["depth_hi"])
+    good = ("median" in stats and stats["valid_frac"] >= cfg["min_valid"] and stats["spread"] <= cfg["max_spread"])
+    if good:
+        world = _surface_to_world(cap, det, stats["median"], cfg["radius"])
+        return world, {"method": "depth", "note": "", "stats": stats, "z": stats["median"]}
+    world, z = size_to_world(cap, det, cfg["marker_h"], cfg["radius"])
+    why = (f"only {stats['valid_frac']:.0%} of the marker has depth" if stats["valid_frac"] < cfg["min_valid"]
+           else f"depth spread is {stats.get('spread', 0):.0f} mm")
+    note = (f"Depth unreliable ({why}), so distance comes from the marker's height "
+            f"({cfg['marker_h']:g} mm tall, {det['bbox'][3]} px in the image).")
+    return world, {"method": "size", "note": note, "stats": stats, "z": z}
 
 
 def depth_preview(depth, max_mm=2000):
@@ -205,3 +272,36 @@ def depth_preview(depth, max_mm=2000):
     colored = cv2.applyColorMap(scaled, cv2.COLORMAP_JET)
     colored[(depth == 0) | (depth == 65535)] = 0
     return cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+
+
+def measure_stable(run, robot, cam, cam_frame, arm_name, cfg, frames=5, min_hits=3, agree_mm=15.0):
+    """Bottle axis position from several frames, so one bad frame can't steer the arm.
+
+    Takes the median of the per-frame positions, drops frames more than `agree_mm` from it, and requires
+    `min_hits` frames to agree. Returns None if too few agree, else a dict with the median world point,
+    how many frames agreed, which distance methods were used, the spread between frames, and the last capture."""
+    points, methods, last = [], [], None
+    for _ in range(frames):
+        cap = capture_frame(run, robot, cam, cam_frame, arm_name)
+        _, det, _ = detect(cap["bgr"], cfg)
+        if det is None:
+            continue
+        world, info = locate(cap, det, cfg)
+        if world is None:
+            continue
+        points.append(world)
+        methods.append(info["method"])
+        last = (cap, det)
+    if len(points) < min_hits:
+        return None
+    pts = np.array(points)
+    med = np.median(pts, axis=0)
+    keep = np.linalg.norm(pts[:, :2] - med[:2], axis=1) <= agree_mm
+    if keep.sum() < min_hits:
+        return None
+    agreed = pts[keep]
+    center = np.median(agreed, axis=0)
+    return {"point": center, "hits": int(keep.sum()), "frames": frames,
+            "methods": sorted(set(m for m, k in zip(methods, keep) if k)),
+            "spread_mm": float(np.max(np.linalg.norm(agreed[:, :2] - center[:2], axis=1))),
+            "last": last}

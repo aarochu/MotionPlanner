@@ -65,6 +65,30 @@ Notes: depth only lines up with the color image if the camera has `"align_color_
 config (`cam2` does; `cam` did not when last checked). Depth cameras of this type can't read closer than about
 30 to 40 cm, so scan from 40 to 50 cm away.
 
+## Corrected grab (`arm`)
+
+If the bottle is slightly misplaced, the taught grab can push it or grip it badly. The corrected grab measures
+the bottle from the `NewMid` keyframe and shifts the `grab_pos` grab by how far the bottle moved.
+
+**Teach once, with the bottle placed correctly** (camera section on `arm`, *Grab correction*):
+
+1. Go to `parking`, then press **Set parking reference**. The bottle is measured from the parking view.
+2. Go to `NewMid`, then press **Set reference**. The bottle is measured over 5 frames and saved.
+3. Go to `grab_pos`, then press **Record grab pose**. The gripper's pose there is saved.
+
+Both are stored in `grab_reference.json`.
+
+**Each run:** at `parking`, press **Scan at parking** (read-only) for a first look: it confirms the bottle is there and no more than 50 mm off before the arm goes anywhere. Then go to `NewMid` and press **Corrected grab**. The `NewMid` scan must agree with the parking scan within 15 mm, or nothing moves (the parking scan is optional but recommended). It measures the bottle (median of 5 frames; 3 must
+agree within 15 mm), computes the offset from the reference, and shows the planned correction. After you
+confirm, the arm moves to a pre-grab point 60 mm back along the gripper's approach, goes straight in to the
+corrected grab (height and orientation as taught), and grabs.
+
+**Black dot:** a dark dot drawn in the middle of the pink marker is used as the exact aim point (the pink center is the fallback when no dot is seen). Distance still comes from the marker's height, since a small dot is only a few pixels across.
+
+The offset is relative to the reference, taken from the same pose with the same method, so most camera error
+cancels out, even with the marker-size distance fallback. Nothing moves if the marker isn't found
+consistently, if the arm isn't at `NewMid`, or if the correction is over 30 mm (`MAX_GRAB_FIX_MM`).
+
 Moves are joint-space (`move_to_joint_positions`), so they are repeatable and the motion planner
 cannot pick a surprising path.
 
@@ -95,9 +119,11 @@ Then open http://127.0.0.1:8501.
 
 | File | What it does |
 |---|---|
-| `streamlit_app.py` | The dashboard UI: joints, jogging, gripper, keyframes, and the Vision card |
-| `vision.py` | Detection and positioning, with no UI code: color mask, shape check, pixel/depth to world |
+| `streamlit_app.py` | The dashboard: joints, jogging, gripper, keyframes, and the camera section that follows the active arm (`arm2`: cap detection and Align; `arm`: pink marker, Locate and corrected grab) |
+| `vision.py` | Pink-marker detection and positioning for `arm`, with no UI code: color mask, optional shape check, center dot, depth with marker-size fallback, multi-frame measuring |
 | `vision_config.json` | Saved detector settings (colors, shape gates, depth range). Loaded on start; edit it by hand or use **Save as default** |
+| `poses.json` | Saved keyframes, grouped by arm: the `arm` group (arm 1, picks up and holds the bottle) and the `arm2` group (unscrews the cap). Each group says which arm it drives, and `play_order` keeps the order across both |
+| `grab_reference.json` | Corrected-grab references for `arm` (created when you teach them) |
 
 Detection is color first, then shape. Color finds blobs; each blob is scored on rectangularity, aspect
 ratio and solidity, and only blobs that pass the gates are considered. The best-scoring one is used.

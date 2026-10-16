@@ -26,10 +26,32 @@ ARM_GRIPPERS = {"arm": "gripper", "arm2": "gripper2"}
 POSES_FILE = Path(os.environ.get("POSES_FILE", "poses.json"))
 MAX_JOG_DEG = 15.0
 JOINTS = [f"Joint {i}" for i in range(6)]  # 0-based, matching the Viam app
+# What each xArm6 joint does, in plain words
+JOINT_DESC = [
+    "Base spin: turns the whole arm left/right",
+    "Shoulder: tilts the arm forward/back",
+    "Elbow: bends the arm to reach in/out",
+    "Forearm roll: twists the forearm along its length",
+    "Wrist bend: tilts the gripper up/down",
+    "Wrist twist: spins the gripper (the unscrew motion)",
+]
 # arm -> (its wrist camera, its gripper). The camera section follows the active arm, and each arm has its own
 # detector: arm2 finds the bottle CAP (silver circle, Hough); arm finds the bottle's PINK marker (color blob).
 RIGS = {"arm": ("cam", "gripper"), "arm2": ("cam2", "gripper2")}
 VISION_CONFIG_FILE = Path(os.environ.get("VISION_CONFIG_FILE", "vision_config.json"))
+# Corrected grab (arm): scan the bottle from SCAN_KEYFRAME, compare with a reference taken with the bottle placed
+# correctly, and shift the GRAB_KEYFRAME grab by the difference.
+GRAB_REF_FILE = Path(os.environ.get("GRAB_REF_FILE", "grab_reference.json"))
+SCAN_KEYFRAME, GRAB_KEYFRAME = "NewMid", "grab_pos"
+MAX_GRAB_FIX_MM = 30.0   # bigger misplacement aborts instead of chasing the bottle
+PRE_GRAB_MM = 60.0       # pre-grab point this far back along the gripper's approach direction
+AT_POSE_TOL_DEG = 1.0    # how close (every joint) the arm must be to a keyframe to count as "at" it
+# Coarse first look from PARK_KEYFRAME: confirms the bottle is there and roughly where before the arm leaves,
+# then the fine scan at SCAN_KEYFRAME must agree with it.
+PARK_KEYFRAME = "parking"
+MAX_PARK_FIX_MM = 50.0   # coarse offset beyond this: re-place the bottle before going anywhere
+CROSS_CHECK_MM = 15.0    # parking and mid-grab offsets must agree within this
+PARK_SCAN_MAX_AGE_S = 300
 MAX_ALIGN_MM = 100.0  # longest single alignment move; run Align again to close the rest
 
 st.set_page_config(page_title="Arm Keyframes", page_icon="🦾", layout="wide")
@@ -72,12 +94,38 @@ def get_robot():
 run, ROBOT, ARMS, GRIPPERS, CAM_RIGS = get_robot()
 
 
+# poses.json groups keyframes by the arm they belong to, so it's unambiguous which arm each one drives.
+POSE_GROUP_DESC = {
+    "arm": "Keyframes for arm (arm 1, with cam and gripper): picks up the bottle and holds it. NOT for arm2.",
+    "arm2": "Keyframes for arm2 (with cam2 and gripper2): unscrews the cap. NOT for arm.",
+}
+
+
 def load_poses():
-    return json.loads(POSES_FILE.read_text()) if POSES_FILE.exists() else []
+    """Flat list of keyframes (each with its "arm"), in play order. Reads the grouped format, or an old flat list."""
+    if not POSES_FILE.exists():
+        return []
+    data = json.loads(POSES_FILE.read_text())
+    if isinstance(data, list):
+        return data
+    order = data.get("play_order")
+    flat = [dict(kf, arm=arm_name) for arm_name, group in data.items() if isinstance(group, dict)
+            for kf in group.get("keyframes", [])]
+    if order:  # keep the cross-arm play order the table and Run sequence use
+        rank = {(o["arm"], o["name"]): n for n, o in enumerate(order)}
+        flat.sort(key=lambda kf: rank.get((kf["arm"], kf["name"]), len(rank)))
+    return flat
 
 
 def save_poses(poses):
-    POSES_FILE.write_text(json.dumps(poses, indent=2))
+    """Write keyframes grouped by arm, with a description per group, plus the cross-arm play order."""
+    data = {}
+    for arm_name in list(RIGS) + sorted({p.get("arm", "arm") for p in poses} - set(RIGS)):
+        group = [p for p in poses if p.get("arm", "arm") == arm_name]
+        data[arm_name] = {"description": POSE_GROUP_DESC.get(arm_name, f"Keyframes for {arm_name}."),
+                          "keyframes": group}
+    data["play_order"] = [{"arm": p.get("arm", "arm"), "name": p["name"]} for p in poses]
+    POSES_FILE.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def joints(arm):
@@ -267,8 +315,9 @@ def live_joints(arm_name):
     st.subheader(f"Live joints — {arm_name}")
     try:
         vals = joints(arm_name)
-        for col, name, v in zip(st.columns(6), JOINTS, vals):
+        for col, name, v, desc in zip(st.columns(6), JOINTS, vals, JOINT_DESC):
             col.metric(name, f"{v:.1f}°")
+            col.caption(desc)
         p = run(ARMS[arm_name].get_end_position())
         st.caption(
             f"End effector — x {p.x:.1f}, y {p.y:.1f}, z {p.z:.1f} mm · "
@@ -289,7 +338,7 @@ with jog_col:
         step = st.select_slider("Step (degrees)", [0.5, 1, 2, 5, 10], value=2)
         for i, name in enumerate(JOINTS):
             label, minus, plus = st.columns([2, 1, 1])
-            label.markdown(f"**{name}**")
+            label.markdown(f"**{name}**  \n{JOINT_DESC[i]}")
             for btn_col, sign, sym in ((minus, -1, "−"), (plus, 1, "+")):
                 if btn_col.button(sym, key=f"jog{i}{sym}", use_container_width=True):
                     delta = sign * step
@@ -329,7 +378,7 @@ with save_col:
                             "gripper": "" if g_action == "none" else g_action, "delay": delay}
                     save_poses([p for p in load_poses() if p["name"] != pose["name"]] + [pose])
                 if safely(do_save):
-                    st.session_state[f"delay_{name.strip()}"] = delay
+                    st.session_state.pop(f"delay_{name.strip()}", None)  # table reads the saved delay
                     st.toast(f"Saved '{name.strip()}'")
                     st.rerun()
 
@@ -404,7 +453,8 @@ with st.container(border=True):
     st.subheader("Move to joint angles")
     cols = st.columns(6)
     targets = [
-        col.number_input(name, min_value=-360.0, max_value=360.0, step=1.0, format="%.2f", key=f"tgt{i}")
+        col.number_input(name, min_value=-360.0, max_value=360.0, step=1.0, format="%.2f", key=f"tgt{i}",
+                         help=JOINT_DESC[i])
         for i, (col, name) in enumerate(zip(cols, JOINTS))
     ]
     b1, b2, _ = st.columns([1, 1, 4])
@@ -471,12 +521,8 @@ def locate_result(cap, cfg):
     if not hit:
         st.warning("No pink marker in that frame. Adjust the pink detection settings.")
         return
-    depth_mode = cfg["method"].startswith("Depth")
-    stats = None
-    if depth_mode:
-        world, stats, note = V.depth_to_world(cap, hit, cfg["radius"], cfg["depth_lo"], cfg["depth_hi"])
-    else:
-        world, note = V.pixel_to_world(cap, *hit["px"], cfg["plane_z"])
+    world, info = V.locate(cap, hit, cfg)       # depth, falling back to marker size when depth is unreliable
+    note, stats, depth_mode = info["note"], info["stats"], info["method"] != "plane"
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Pixel (u, v)", f"{hit['px'][0]:.0f}, {hit['px'][1]:.0f}")
     m2.metric("Blob size (px)", f"{hit['bbox'][2]} × {hit['bbox'][3]}")
@@ -485,14 +531,122 @@ def locate_result(cap, cfg):
     else:
         m3.metric("World x, y (mm)", f"{world[0]:.1f}, {world[1]:.1f}")
         m4.metric("World z (mm)", f"{world[2]:.1f}")
+        if depth_mode:
+            st.caption(f"Distance {info['z']:.0f} mm from "
+                       f"{'depth' if info['method'] == 'depth' else 'marker size (fallback)'}.")
         if note:
             st.warning(note)
     if stats and "median" in stats:
         st.caption(f"Marker depth: median {stats['median']:.0f} mm, spread {stats['spread']:.0f} mm, "
                    f"{stats['valid_frac']:.0%} of pixels valid ({stats['n']} px).")
     if depth_mode:
-        st.caption("Depth mode needs `align_color_depth: true` on this camera in the Viam config "
-                   "(cam2 has it; cam did not when last checked), otherwise depth won't line up with the image.")
+        st.caption("Depth needs `align_color_depth: true` on this camera in the Viam config so depth lines up "
+                   "with the image (both cam and cam2 have it as of the last check).")
+
+
+def load_grab_ref():
+    return json.loads(GRAB_REF_FILE.read_text()) if GRAB_REF_FILE.exists() else {}
+
+
+def save_grab_ref(ref):
+    GRAB_REF_FILE.write_text(json.dumps(ref, indent=2) + "\n")
+
+
+def at_keyframe(name, arm_name="arm"):
+    """(is the arm at this keyframe?, largest joint difference in degrees, the keyframe or None)."""
+    kf = next((p for p in load_poses() if p["name"] == name and p.get("arm", "arm") == arm_name), None)
+    if kf is None:
+        return False, None, None
+    diff = max(abs(a - b) for a, b in zip(joints(arm_name), kf["values"]))
+    return diff <= AT_POSE_TOL_DEG, diff, kf
+
+
+def pose_dict(p):
+    return {k: float(getattr(p, k)) for k in ("x", "y", "z", "o_x", "o_y", "o_z", "theta")}
+
+
+def plan_corrected_grab(ref, measured_xy):
+    """Shift the recorded grab pose by (measured - reference) in x, y; keep height and orientation.
+    The pre-grab point is PRE_GRAB_MM back along the gripper's approach direction (its orientation vector)."""
+    dx, dy = measured_xy[0] - ref["bottle_xy"][0], measured_xy[1] - ref["bottle_xy"][1]
+    g = ref["grab_pose"]
+    grab = dict(g, x=g["x"] + dx, y=g["y"] + dy)
+    o = np.array([g["o_x"], g["o_y"], g["o_z"]])
+    o = o / np.linalg.norm(o)
+    pre = dict(grab, x=grab["x"] - PRE_GRAB_MM * o[0], y=grab["y"] - PRE_GRAB_MM * o[1],
+               z=grab["z"] - PRE_GRAB_MM * o[2])
+    return {"dx": dx, "dy": dy, "norm": float(np.hypot(dx, dy)), "grab": grab, "pre": pre}
+
+
+def measure_bottle_now(cfg):
+    return V.measure_stable(run, ROBOT, CAM_RIGS["arm"][0], RIGS["arm"][0], "arm", cfg)
+
+
+@st.dialog("Corrected grab", width="large")
+def confirm_corrected_grab(cfg):
+    if st.session_state.get("cgrab_yes") and "cgrab_plan" in st.session_state:
+        # "Yes, move" reruns this dialog: execute the plan that was shown, not a fresh measurement
+        plan = st.session_state.pop("cgrab_plan")
+        def go():
+            arm_ = ARMS["arm"]
+            run(arm_.move_to_position(Pose(**plan["pre"])))
+            run(arm_.move_to_position(Pose(**plan["grab"])))
+            apply_gripper("arm", plan["gripper"])
+        with st.spinner("Moving: pre-grab, then straight in…"):
+            ok = safely(go)
+        if ok:
+            st.rerun()
+        return
+    ref = load_grab_ref()
+    at_scan, diff, _ = at_keyframe(SCAN_KEYFRAME)
+    if not at_scan:
+        st.error(f"The arm must be at '{SCAN_KEYFRAME}' to scan (it is {diff:.1f}° away). "
+                 f"Press Go on '{SCAN_KEYFRAME}' first." if diff is not None
+                 else f"No keyframe named '{SCAN_KEYFRAME}' for arm.")
+        return
+    with st.spinner("Measuring the bottle over 5 frames…"):
+        try:
+            m = measure_bottle_now(cfg)
+        except Exception as e:
+            st.error(f"Measurement failed: {e}")
+            return
+    if m is None:
+        st.error("The pink marker wasn't found consistently (needs 3 of 5 frames agreeing within 15 mm). "
+                 "Nothing will move.")
+        return
+    plan = plan_corrected_grab(ref, m["point"][:2])
+    cap, det = m["last"]
+    st.image(cv2.cvtColor(V.draw_detections(cap["bgr"], det, [det]), cv2.COLOR_BGR2RGB), use_container_width=True)
+    st.caption(f"{m['hits']}/{m['frames']} frames agreed (within {m['spread_mm']:.1f} mm) · distance from "
+               f"{', '.join(m['methods'])}")
+    st.table({
+        "": ["Bottle (reference)", "Bottle (now)", "Correction"],
+        "x (mm)": [f"{ref['bottle_xy'][0]:.1f}", f"{m['point'][0]:.1f}", f"{plan['dx']:+.1f}"],
+        "y (mm)": [f"{ref['bottle_xy'][1]:.1f}", f"{m['point'][1]:.1f}", f"{plan['dy']:+.1f}"],
+    })
+    ps = st.session_state.get("park_scan")
+    if ps and ps.get("offset") is not None and time.time() - ps["time"] <= PARK_SCAN_MAX_AGE_S:
+        disagree = float(np.hypot(plan["dx"] - ps["offset"][0], plan["dy"] - ps["offset"][1]))
+        if disagree > CROSS_CHECK_MM:
+            st.error(f"The parking scan and the {SCAN_KEYFRAME} scan disagree by {disagree:.0f} mm "
+                     f"(limit {CROSS_CHECK_MM:.0f} mm), so one of them is wrong. Nothing will move.")
+            return
+        st.success(f"Parking scan agrees with this scan within {disagree:.0f} mm.")
+    else:
+        st.info(f"No recent parking scan to cross-check (optional): press Scan at {PARK_KEYFRAME} before going "
+                f"to {SCAN_KEYFRAME} for an extra check.")
+    if plan["norm"] > MAX_GRAB_FIX_MM:
+        st.error(f"The bottle is {plan['norm']:.0f} mm from where it should be, more than the "
+                 f"{MAX_GRAB_FIX_MM:.0f} mm limit. Re-place the bottle. Nothing will move.")
+        return
+    _, _, grab_kf = at_keyframe(GRAB_KEYFRAME)
+    plan["gripper"] = (grab_kf or {}).get("gripper", "grab") or "grab"
+    st.write(f"Plan: move to a pre-grab point {PRE_GRAB_MM:.0f} mm back, go straight in to the corrected grab "
+             f"({plan['norm']:.1f} mm from the taught one), then **{plan['gripper']}**. Height and orientation "
+             "stay as taught.")
+    st.caption("Keep the e-stop in reach.")
+    st.session_state["cgrab_plan"] = plan
+    st.button("Yes, move", type="primary", key="cgrab_yes")
 
 
 if CAMERA is not None and CAM_ARM in ARMS:
@@ -537,18 +691,25 @@ if CAMERA is not None and CAM_ARM in ARMS:
                               help="Depth uses the marker's measured distance. Plane assumes a known grasp height and "
                                    "needs the camera to look downward.")
             radius, (d_lo, d_hi), plane_z = cfg["radius"], (cfg["depth_lo"], cfg["depth_hi"]), cfg["plane_z"]
+            marker_h = cfg["marker_h"]
             if method.startswith("Depth"):
                 radius = st.number_input("Bottle radius (mm)", 5.0, 150.0, float(cfg["radius"]), 1.0, key="m_radius",
                                          help="Distance from the marker surface to the bottle's axis.")
                 d_lo, d_hi = st.slider("Valid depth (mm)", 100, 3000, (cfg["depth_lo"], cfg["depth_hi"]), step=10,
                                        key="m_depth")
+                marker_h = st.number_input("Marker height (mm)", 10.0, 300.0, float(cfg["marker_h"]), 1.0,
+                                           key="m_markerh",
+                                           help="Fallback when depth fails: distance from how tall the marker looks. "
+                                                "Measure it; a 3-inch sticky note is about 76 mm.")
             else:
                 st.session_state.setdefault("m_plane", cfg["plane_z"])
                 plane_z = st.number_input("Grasp point z (mm, world)", step=1.0, format="%.1f", key="m_plane")
                 st.button("Use current gripper height", on_click=use_gripper_height)
             live_cfg = {"hue_lo": hue[0], "hue_hi": hue[1], "sat_min": sat_min, "val_min": val_min,
                         "min_area": min_area, "use_shape": use_shape, "min_rect": min_rect, "max_aspect": max_aspect,
-                        "method": method, "radius": radius, "depth_lo": d_lo, "depth_hi": d_hi, "plane_z": plane_z}
+                        "method": method, "radius": radius, "depth_lo": d_lo, "depth_hi": d_hi, "plane_z": plane_z,
+                        "marker_h": marker_h, "min_valid": cfg["min_valid"], "max_spread": cfg["max_spread"],
+                        "use_dot": cfg["use_dot"], "dot_v_max": cfg["dot_v_max"], "dot_min_area": cfg["dot_min_area"]}
             if st.button("💾 Save as default", use_container_width=True,
                          help=f"Writes these pink-detection settings to {VISION_CONFIG_FILE}."):
                 V.save_config(VISION_CONFIG_FILE, live_cfg)
@@ -562,6 +723,84 @@ if CAMERA is not None and CAM_ARM in ARMS:
                         st.session_state["locate"] = V.capture_frame(run, ROBOT, CAMERA, CAM, CAM_ARM)
                 except Exception as e:
                     st.error(f"Capture failed: {e}")
+            ref = load_grab_ref()
+            ref_ready = "bottle_xy" in ref and "grab_pose" in ref
+            with st.expander("Grab correction", expanded=not ref_ready):
+                st.caption(f"Teach once with the bottle placed correctly: at **{SCAN_KEYFRAME}** press Set reference, "
+                           f"then Go to **{GRAB_KEYFRAME}** and press Record grab pose.")
+                if st.button(f"Set reference (at {SCAN_KEYFRAME})", use_container_width=True):
+                    ok_pose, diff, _ = at_keyframe(SCAN_KEYFRAME)
+                    if not ok_pose:
+                        st.error(f"Go to '{SCAN_KEYFRAME}' first" + (f" ({diff:.1f}° away)." if diff is not None
+                                                                    else f": no keyframe named '{SCAN_KEYFRAME}'."))
+                    else:
+                        with st.spinner("Measuring over 5 frames…"):
+                            m = measure_bottle_now(live_cfg)
+                        if m is None:
+                            st.error("Pink marker not found consistently. Reference not saved.")
+                        else:
+                            ref.update(bottle_xy=[float(m["point"][0]), float(m["point"][1])],
+                                       bottle_methods=m["methods"], scan_keyframe=SCAN_KEYFRAME,
+                                       reference_time=time.strftime("%Y-%m-%d %H:%M:%S"))
+                            save_grab_ref(ref)
+                            st.toast(f"Reference saved: bottle at ({m['point'][0]:.1f}, {m['point'][1]:.1f}) mm")
+                if st.button(f"Set parking reference (at {PARK_KEYFRAME})", use_container_width=True):
+                    ok_pose, diff, _ = at_keyframe(PARK_KEYFRAME)
+                    if not ok_pose:
+                        st.error(f"Go to '{PARK_KEYFRAME}' first" + (f" ({diff:.1f}° away)." if diff is not None
+                                                                    else f": no keyframe named '{PARK_KEYFRAME}'."))
+                    else:
+                        with st.spinner("Measuring over 5 frames…"):
+                            m = measure_bottle_now(live_cfg)
+                        if m is None:
+                            st.error("Pink marker not found consistently. Parking reference not saved.")
+                        else:
+                            ref.update(park_bottle_xy=[float(m["point"][0]), float(m["point"][1])],
+                                       park_keyframe=PARK_KEYFRAME)
+                            save_grab_ref(ref)
+                            st.toast(f"Parking reference saved: ({m['point'][0]:.1f}, {m['point'][1]:.1f}) mm")
+                if st.button(f"Record grab pose (at {GRAB_KEYFRAME})", use_container_width=True):
+                    ok_pose, diff, _ = at_keyframe(GRAB_KEYFRAME)
+                    if not ok_pose:
+                        st.error(f"Go to '{GRAB_KEYFRAME}' first" + (f" ({diff:.1f}° away)." if diff is not None
+                                                                    else f": no keyframe named '{GRAB_KEYFRAME}'."))
+                    else:
+                        ref.update(grab_pose=pose_dict(run(ARMS["arm"].get_end_position())),
+                                   grab_keyframe=GRAB_KEYFRAME)
+                        save_grab_ref(ref)
+                        st.toast("Grab pose recorded")
+                st.caption(("Reference: bottle at ({:.1f}, {:.1f}) mm, set {}.".format(*ref["bottle_xy"], ref.get("reference_time", ""))
+                            if "bottle_xy" in ref else "Reference: not set.")
+                           + (" Grab pose: recorded." if "grab_pose" in ref else " Grab pose: not recorded.")
+                           + (" Parking reference: set." if "park_bottle_xy" in ref else " Parking reference: not set."))
+            if st.button(f"📡 Scan at {PARK_KEYFRAME}", use_container_width=True, disabled="park_bottle_xy" not in ref,
+                         help=f"Read-only first look from {PARK_KEYFRAME}: is the bottle there, and how far from "
+                              f"where it should be (max {MAX_PARK_FIX_MM:.0f} mm)?"):
+                ok_pose, diff, _ = at_keyframe(PARK_KEYFRAME)
+                if not ok_pose:
+                    st.error(f"Go to '{PARK_KEYFRAME}' first" + (f" ({diff:.1f}° away)." if diff is not None else "."))
+                else:
+                    with st.spinner("Measuring over 5 frames…"):
+                        m = measure_bottle_now(live_cfg)
+                    if m is None:
+                        st.session_state["park_scan"] = {"offset": None, "time": time.time()}
+                        st.error("No bottle found from parking. Don't proceed.")
+                    else:
+                        dx = m["point"][0] - ref["park_bottle_xy"][0]
+                        dy = m["point"][1] - ref["park_bottle_xy"][1]
+                        norm = float(np.hypot(dx, dy))
+                        st.session_state["park_scan"] = {"offset": (float(dx), float(dy)), "norm": norm,
+                                                         "time": time.time()}
+                        if norm > MAX_PARK_FIX_MM:
+                            st.error(f"Bottle is about {norm:.0f} mm from where it should be (dx {dx:+.0f}, "
+                                     f"dy {dy:+.0f}). Re-place it before going anywhere.")
+                        else:
+                            st.success(f"Bottle found, about {norm:.0f} mm from where it should be (dx {dx:+.0f}, "
+                                       f"dy {dy:+.0f}). OK to Go to {SCAN_KEYFRAME}.")
+            if st.button("🎯 Corrected grab", type="primary", use_container_width=True, disabled=not ref_ready,
+                         help=f"At {SCAN_KEYFRAME}: measure the bottle, shift the {GRAB_KEYFRAME} grab by its offset "
+                              f"(max {MAX_GRAB_FIX_MM:.0f} mm), confirm, then move."):
+                confirm_corrected_grab(live_cfg)
 
     @st.fragment(run_every=1.0 if live else None)
     def cam_feed_cap(settings):
