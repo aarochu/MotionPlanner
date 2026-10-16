@@ -2,7 +2,7 @@
 
 This file explains what this repo is for, how the hardware is set up, what has been built, why it was built
 that way, what is verified, and what is still open. Read it before changing anything. It reflects Aaron's work
-up to the creation of the `aaron-main` branch.
+up to the creation of the `aaron-main` branch, plus Rishi's `arm2` unscrew / full run merged in on `full-sequence`.
 
 Related docs: `README.md` (features, setup), `HANDOFF.md` (short handoff for the `arm` work), `RUN_BOTH.md`
 (running both arms' sequences on one computer).
@@ -28,7 +28,7 @@ Address: `armfarm16-main.310sld03v2.viam.cloud`. Machine id `bef83ec4-99e5-49cd-
 | `arm` | `viam:ufactory:xArm6` | From shared fragment `xarm-realsense-gripper2` (`859f2598-60f1-43a2-8df2-13ffbee949cc`). Frame = `world` origin, so arm's base frame equals world |
 | `cam` | `viam:camera:realsense` (likely D435) | On `arm`'s wrist. 1280×720 color + depth. `align_color_depth: true` added as a fragment mod (see §7) |
 | `gripper` | `viam:ufactory:gripper` | On `arm`, 105 mm out from the flange |
-| `arm2` | `viam:ufactory:xArm6` | Defined directly on the machine. Base at world (0, −723.9, 0) |
+| `arm2` | `viam:ufactory:xArm6` | Defined directly on the machine. Base at world (0, −914, 0) (was −723.9 until a teammate changed it on 2026-10-16) |
 | `cam2` | `viam:camera:realsense` | On `arm2`'s wrist, looking down. `align_color_depth: true` |
 | `gripper2` | `viam:ufactory:gripper` | On `arm2` |
 | Obstacles | `table`, `wall-front`, `wall-side`, `ceiling`, `box-shelf` | Modeled boxes the motion planner avoids. `box-shelf` was moved by a teammate during the work |
@@ -54,6 +54,10 @@ Arm settings (both): `speed_degs_per_sec: 60` (module default), acceleration at 
 | `vision.py` | Pink-marker detection and positioning for `arm` (no UI code) |
 | `poses_io.py` | `poses.json` reading/writing and which keyframes each Run choice plays (no UI code) |
 | `import_poses.py` | CLI to add keyframes from another poses file after the existing ones |
+| `cap_vision.py` | Rishi's cap detection for `cam2` (`circle_features`, `detect_circles` are imported by the dashboard) |
+| `cap_unscrew.py` | `arm2` regrasp unscrew sequence (thread), grip force/speed, tool levelling |
+| `bottle_task.py` | Full run (thread): both arms' keyframes → unscrew → retreat → via → trash drop; shared `go_to_keyframe` |
+| `cap_tracker.py` | Slow XY cap tracking for `arm2`; not wired into this GUI |
 | `poses.json` | Saved keyframes, grouped by arm (§5) |
 | `vision_config.json` | Saved pink-detection settings (loaded on start; **Save as default** writes it) |
 | `grab_reference.json` | Corrected-grab references; created when taught (not in the repo yet) |
@@ -79,7 +83,7 @@ The sidebar's **Active arm** chooses which arm the jog/gripper/save controls and
  "play_order": [{"arm": "arm", "name": "parking"}, ...]}
 ```
 
-Current `arm` keyframes (`arm2` group is empty in this repo; Rishi's are on his computer):
+Current `arm` keyframes:
 
 | Keyframe | Joints 0–5 (°) | Gripper | Role |
 |---|---|---|---|
@@ -89,8 +93,32 @@ Current `arm` keyframes (`arm2` group is empty in this repo; Rishi's are on his 
 | `grabframe1` | −50.7, 6.0, −68.7, 110.5, 58.6, 236.9 | – | After the grab |
 | `end` | −117.6, 27.5, −43.9, 94.1, 88.6, 199.4 | – | Holds the bottle on the table (no gripper action, so it keeps holding) |
 
-All keyframe moves are joint-space (`move_to_joint_positions`): repeatable, and the planner cannot choose a
-surprising path. Each keyframe can have a gripper action (grab/open) and a delay after it.
+Current `arm2` keyframes (Rishi's). They are **XYZ + orientation** keyframes (`"pose"`: x, y, z mm and orientation
+vector o_x, o_y, o_z, θ, in `arm2`'s base frame), reached with the motion planner:
+
+| Keyframe | x, y, z (mm, base frame) | Orientation (o_x, o_y, o_z, θ) | Gripper | Role |
+|---|---|---|---|---|
+| `safe_bottle_start_pose` | 297.1, 61.9, 235.0 | 0.616, 0.787, −0.027, 0.49 | open | Clear start; gripper sideways |
+| `open_bottle_cap_up_pose` | 33.7, 447.0, 570.9 | 0.000, 0.003, −1.000, −88.2 | open | 100 mm above the cap pose |
+| `open_bottle_cap_pose` | 33.7, 447.0, 470.9 | 0.000, 0.003, −1.000, −88.2 | open | Fingers around the cap; unscrew start |
+| `trash_drop_pose` | 435.0, −66.0, 140.0 | 0.000, −1.000, 0.000, 0.04 | open | Where the cap is dropped |
+
+Joint keyframes (`"values"`) are joint-space moves (`move_to_joint_positions`): repeatable, and the planner cannot
+choose a surprising path. Pose keyframes go through the motion planner (exact pose, path and arm configuration
+chosen by the planner). **Save as** picks the type when saving. Each keyframe can have a gripper action
+(grab/open) and a delay after it.
+
+**Full run** (`bottle_task.py`, panel above the keyframe table): (1) the "arm, then arm2" keyframes except
+`trash_drop_pose`; (2) the unscrew with the Unscrew panel's settings; (3) straight up to `open_bottle_cap_up_pose`'s
+height holding the cap (orientation kept), via `safe_bottle_start_pose` (move only), then `trash_drop_pose` + open.
+Names are code constants `UNSCREW_START_POSE`, `RETREAT_POSE`, `VIA_POSES`, `TRASH_DROP_POSE`. A failed step or
+Stop/STOP ALL halts both arms and skips the drop.
+
+**Unscrew** (`cap_unscrew.py`): from the start keyframe it levels the tool to straight down (only if ≥ 1° off, max
+15°), then N twists of Joint 5 (default 4 × 120°, counter-clockwise from above = −J5 with the tool down): grab →
+twist → open to the release width → twist back, all at one height; the last twist keeps hold and lifts the cap
+(default 30 mm). Speed (default 60°/s) and G2 grip force (default 60%) are set for the run and restored to 60°/s and
+50% afterwards. Dry run (default on) allows empty grabs.
 
 **Run sequence** choices (`poses_io.RUN_OPTIONS`): **arm, then arm2** (default: all arm keyframes, then all arm2),
 **Both arms (table order)**, **arm only**, **arm2 only**. Arms never move at the same time. Run sequence plays
@@ -100,7 +128,9 @@ keyframes exactly as taught; camera corrections are not part of it.
 
 ### `arm2` (Rishi's logic, unchanged)
 
-Hough circles filtered for a silver cap (silver share, few dark pixels, crisp outline); median over 5 frames;
+Hough circles filtered for a silver cap (silver share, few dark pixels, crisp outline); "silver" and "dark" are
+judged relative to the white table's brightness in the same frame (fixed thresholds failed when the cap was in
+shade at the unscrew pose); median over 5 frames;
 distance from aligned depth if ≥ 60% of a center disk is valid, else from cap size (`Z = fx·D/2r`, D = cap
 diameter). **Align** moves `arm2` so `gripper2` is over the cap with `move_to_position`, max 100 mm per press,
 after a confirmation.
@@ -150,6 +180,14 @@ size fallback is acceptable.
   without its AI co-author trailer.
 - **Keyframes as config:** `poses.json` was gitignored on `cam_branch`; here it is tracked and grouped by arm.
 - **Run "arm, then arm2"** was added so one computer runs Aaron's sequence, then Rishi's.
+- **Merge with Rishi's `rishi-sequence` (branch `full-sequence`):** Aaron's GUI and `poses.json` format kept as the
+  base; Rishi's unscrew, full run and XYZ keyframes ported in; the dashboard's cap functions now come from
+  `cap_vision.py` (lighting-robust version).
+- **Levelling:** keeping θ fixed while changing the orientation vector near straight-down spun the gripper ~40°
+  (orientation vectors are ill-conditioned there). The tilt is now built in the tool frame, converted by the frame
+  system and verified through a virtual frame (axis down, gripper point fixed, roll unchanged) before moving.
+- **`context canceled` errors** on `arm2` came from something else commanding the arm (hand guiding / Viam app /
+  config save) mid-move: the xArm driver cancels the in-flight move on any new command.
 
 ## 8. Verified vs not verified
 
@@ -158,7 +196,11 @@ SDK; frame transforms for both cameras; size fallback math; corrected-grab math 
 measuring repeatable within 2–3 mm; parking scan; poses grouping round trip; import script; Run choice and
 dialog (opened, not executed) — all via headless `streamlit.testing` runs and read-only probes.
 
-Not verified: the corrected-grab motion on the arm; a combined arm→arm2 run; Rishi's real keyframe file;
+Rishi's unscrew has run on hardware (raising grip force made it work). The full run's keyframes → unscrew →
+retreat ran up to the trash move. The merged full run (arm's sequence first) is verified only in simulation and
+headless rendering.
+
+Not verified: the corrected-grab motion on the arm; a combined arm→arm2 run on hardware; Rishi's real keyframe file;
 absolute accuracy of positions against a tape measure; the alignment fix's effect (only indirectly).
 
 ## 9. Open items / next steps
@@ -168,11 +210,14 @@ absolute accuracy of positions against a tape measure; the alignment fix's effec
 2. Teach the three corrected-grab references and try the corrected grab slowly; check the pre-grab point stops in
    front of the bottle. Commit `grab_reference.json`.
 3. Add the corrected grab to Run sequence once reliable (correct `grab_pos` automatically, same gates).
-4. Rishi: pull, import his `arm2` keyframes (`RUN_BOTH.md`), commit `poses.json`.
+4. Done on `full-sequence`: Rishi's `arm2` keyframes are in `poses.json`.
 5. `arm` appears faster than `arm2` with identical config; measure both on the same jog. To slow `arm`, add
    `"components.arm.attributes.speed_degs_per_sec": 30` to the same fragment mod.
 6. Possibly try Rishi's center-disk depth sampling around the dot at `parking`; possibly a ~40 mm circle for
    circle-based distance; possibly use the `bottle-handoff` switch to signal arm → arm2.
+7. `trash_drop_pose` is rejected by the motion planner (wrist vs `cam2` self-collision, forearm vs `table`). Store it
+   as joints (`[4.4, 30.08, -55.13, -86.01, 91.86, -204.94]`), allow those collisions for that move, or fix the
+   collision model. Until then the full run stops at "3/3 drop" holding the cap.
 
 ## 10. Working rules (from the project owner)
 
@@ -207,4 +252,6 @@ absolute accuracy of positions against a tape measure; the alignment fix's effec
 | `cam_branch` | Rishi's original cam2/cap work (its commit message has an AI co-author trailer; the squashed copy in this history does not) |
 | `bottle-stabilizer` | `main` + `HANDOFF.md` |
 | `combined-sequence` | + Run "arm, then arm2", `poses_io.py`, `import_poses.py`, `RUN_BOTH.md` |
-| `aaron-main` | Everything above + this file. **Start here.** |
+| `aaron-main` | Everything above + this file |
+| `rishi-sequence` | Rishi's work: cap detection fixes, unscrew, full run, XYZ keyframes, `arm2` keyframes |
+| `full-sequence` | `aaron-main` + `rishi-sequence` merged: Full run plays arm's sequence, then arm2's. **Start here.** |

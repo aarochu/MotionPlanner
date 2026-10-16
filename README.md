@@ -19,7 +19,10 @@ Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer?
 - Save the current pose as a named keyframe, optionally with a gripper action after arriving
 - Reorder, delete, replay (Go) and run all keyframes in order across both arms
 - Export keyframes as a Python `POSES = {...}` dict for use in your own scripts
-- STOP ALL button for both arms
+- STOP ALL button for both arms (also stops the unscrew and the full run)
+- **Unscrew** (`arm2`): regrasp unscrew of the cap (grab, twist, open, twist back; the last twist lifts the cap)
+- **Full run**: `arm`'s sequence, then `arm2`'s keyframes, the unscrew, a retreat and the trash drop, in one go
+- Keyframes as joints or as XYZ + orientation
 - A camera section that follows the **active arm**, with a live feed and optional depth view. Each arm has its
   own detector:
   - **`arm2` (`cam2`): bottle cap** (his logic). Finds the silver cap and has an **Align** button that moves
@@ -30,7 +33,8 @@ Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer?
 ## Bottle cap detection and alignment (`arm2`)
 
 `cam2` is a RealSense on `arm2`'s wrist, looking down. Each frame the app finds circles with a Hough
-transform and keeps only the bottle cap: a circle that is mostly silver (bright, unsaturated), has almost no
+transform and keeps only the bottle cap: a circle that is mostly silver (unsaturated and at least half as bright
+as the white table in the same frame, so shade or lighting changes don't matter), has almost no
 dark pixels (the dark bottle body and neck fail this) and has a crisp outline most of the way round (partial
 circles inside the cap fail this). **Align** uses the median cap over 5 frames, so one bad frame cannot steer
 the arm. Turn on *Show rejected circles* to see what was filtered out (thin red). Its distance comes
@@ -96,6 +100,54 @@ consistently, if the arm isn't at `NewMid`, or if the correction is over 30 mm (
 Moves are joint-space (`move_to_joint_positions`), so they are repeatable and the motion planner
 cannot pick a surprising path.
 
+## Full run (both arms)
+
+**Full run** plays, one after another, with the two arms never moving at the same time:
+
+1. **Keyframes:** every `arm` keyframe (Aaron's sequence: `parking` → `NewMid` → `grab_pos` → `grabframe1` → `end`,
+   which ends holding the bottle), then every `arm2` keyframe except `trash_drop_pose`
+   (`safe_bottle_start_pose` → `open_bottle_cap_up_pose` → `open_bottle_cap_pose`). Same order as Run sequence's
+   "arm, then arm2".
+2. **Unscrew** with the Unscrew panel's settings (below).
+3. **Retreat and drop:** straight up to `open_bottle_cap_up_pose`'s height while still holding the cap, keeping the
+   orientation the unscrew left (`RETREAT_POSE`); through `safe_bottle_start_pose` (move only, `VIA_POSES`); then
+   `trash_drop_pose` and its gripper action (`open`, so the cap drops; `TRASH_DROP_POSE`).
+
+Any failure, **Stop full run** or STOP ALL ends the run where it is and stops the arms; it never continues to the
+drop after a failed unscrew. A confirmation lists every step of all three phases first.
+
+Keyframes can be joints (`"values": [j0..j5]`, joint-space move) or a pose (`"pose": {"x", "y", "z", "o_x", "o_y",
+"o_z", "theta"}` in mm / orientation vector, in the arm's base frame as `get_end_position` reports; moved to with the
+motion planner). Choose with **Save as** when saving. The `arm2` keyframes are poses. Note the Viam app's arm card
+shows world coordinates; for `arm2` (base at world y = −914 mm) the world Y is 914 mm lower than the base-frame Y.
+
+Known issue: the planner has rejected the move to `trash_drop_pose` (its collision model reports `arm2`'s wrist
+against `cam2` and the forearm against `table` at that pose, which was taught by jogging joints). If it fails there,
+the run stops holding the cap at `safe_bottle_start_pose`; storing `trash_drop_pose` as joints is the simplest fix.
+
+## Unscrew (`arm2`)
+
+With the other arm holding the bottle, press **Unscrew**. The gripper opens to the release width and `arm2`
+moves to the **Start pose** keyframe (default `open_bottle_cap_pose`, `UNSCREW_START_POSE` in
+`streamlit_app.py`), which should put the open fingers around the cap. It then **levels the tool to point exactly straight down**,
+pivoting about the gripper (105 mm from the flange) so the fingers stay over the cap, and refuses if the pose
+is more than 15° off vertical. **Grip force** (G2 gripper, 1–100 %, default 60) applies to every grab and is
+reset to 50 % afterwards. Then each twist: **grab → unscrew** (rotate Joint 5 by the twist angle) **→ open →
+twist back**, all at the same height. The last twist keeps hold of the cap and **lifts it straight up** by the
+final lift, and the sequence ends there (it does not return to the start pose). The arm runs at
+the **Speed** setting (default 60°/s) and its speed is restored to 60°/s afterwards, even on error. Stop / STOP ALL halt it.
+
+It refuses to start unless the tool points straight down. With the tool down, +Joint 5 turns clockwise seen
+from above, so loosening is −Joint 5. **Do a dry run first** (on by default), without a cap: the full cycle
+runs, including open/close and the final lift, but an empty grab is not an error. Watch that the
+wrist turns counter-clockwise seen from above while closed; if not, switch the direction.
+
+Levelling builds the smallest tilt that points the tool down in the tool's own frame, lets the frame system
+convert it, and checks it before moving (axis down, gripper point fixed, roll unchanged).
+
+Don't command `arm2` from anywhere else (Viam app, another script, a config save) while a sequence runs: the
+xArm driver cancels the move in progress, which shows up as `context canceled`.
+
 ## Setup
 
 Requires Python 3.10+.
@@ -130,6 +182,10 @@ Then open http://127.0.0.1:8501.
 | `grab_reference.json` | Corrected-grab references for `arm` (created when you teach them) |
 | `poses_io.py` | Reading and writing `poses.json`, and which keyframes each Run sequence choice plays |
 | `import_poses.py` | Adds keyframes from another poses file (e.g. Rishi's `arm2` ones) after the existing ones |
+| `cap_vision.py` | Bottle-cap detection for `cam2` (used by the camera section) and its geometry helpers |
+| `cap_unscrew.py` | The `arm2` unscrew sequence, grip force/speed handling and tool levelling |
+| `bottle_task.py` | The full run (both arms' keyframes → unscrew → retreat → trash drop) and the shared keyframe move |
+| `cap_tracker.py` | Slow XY tracking of the cap with `arm2` (not wired into this GUI yet) |
 
 Detection is color first, then shape. Color finds blobs; each blob is scored on rectangularity, aspect
 ratio and solidity, and only blobs that pass the gates are considered. The best-scoring one is used.

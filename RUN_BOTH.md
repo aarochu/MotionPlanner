@@ -61,6 +61,13 @@ Keep your own `env.sh` (it's gitignored), then start the dashboard:
 
 Keep the e-stop in reach, especially on the first run.
 
+## Full run (keyframes, unscrew, drop in one go)
+
+On `full-sequence` the `arm2` keyframes are already in `poses.json`. The **Full run** panel plays all of `arm`'s
+keyframes, then `arm2`'s (except `trash_drop_pose`), then the unscrew (Unscrew panel settings), then lifts the cap
+straight up, passes `safe_bottle_start_pose` and drops the cap at `trash_drop_pose`. Turn off the Unscrew panel's
+**Dry run** for a real cap. See README → Full run.
+
 ## Good to know
 
 - **Aaron's sequence ends at `end` holding the bottle.** `end` has no gripper action, so the gripper stays closed
