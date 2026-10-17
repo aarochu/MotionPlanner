@@ -55,7 +55,8 @@ Keep your own `env.sh` (it's gitignored), then start the dashboard:
 
 1. Open http://127.0.0.1:8501 and check the **Keyframes** table: Aaron's `arm` keyframes (`parking`, `NewMid`,
    `grab_pos`, `grabframe1`, `end`) and your `arm2` ones.
-2. Under **Run which keyframes**, choose **arm, then arm2** (the default).
+2. Under **Run which steps**, choose **arm, then arm2** (the default). To play only part of it, drag the ends of
+   **Run from … to …**.
 3. Press **▶ Run sequence** and confirm. It plays every `arm` keyframe, then every `arm2` keyframe, one move at a
    time. The two arms never move at the same time.
 

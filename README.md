@@ -18,6 +18,10 @@ Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer?
 - Open / close the gripper
 - Save the current pose as a named keyframe, optionally with a gripper action after arriving
 - Reorder, delete, replay (Go) and run all keyframes in order across both arms
+- **Run from … to …**: a range slider under Run sequence to play only part of the sequence (both ends included)
+- **Wrist-wave intro** for `arm`: `parking` → `right1` → `left1` → `right2` → `left2` (Joint 5 twisted about ±60°)
+  → `parking_close` (claw closes) → `parking_open` (claw opens), then the real sequence from `NewMid`. It is
+  purely for show, and runs at the start of Run sequence and Full run (not the Simple tab's YOLO routine)
 - Export keyframes as a Python `POSES = {...}` dict for use in your own scripts
 - STOP ALL button for both arms (also stops the unscrew and the full run)
 - **Unscrew** (`arm2`): regrasp unscrew of the cap (grab, twist, open, twist back; the last twist lifts the cap)
@@ -240,8 +244,12 @@ How it aims, and the numbers measured on 2026-10-16:
   the measured width, which reads high (tape band, edge blur, a cut-off box). It still refuses a target that reads
   over `max_width_mm` (115 mm): that is not one bottle.
 - Place spot: arm end at x −91.1, y −379.5, heading −31.9°, level; `PLACE_ABOVE_JOINTS` puts it 200 mm up.
-  `TABLE_Z = -8.7` mm (bottle set down by eye at arm-end z 104.0 with the pads 112.7 mm above its measured bottom).
+  `TABLE_Z = -10.7` mm: the −8.7 found by eye (arm-end z 104.0 with the pads 112.7 mm above the bottle's measured
+  bottom), lowered 2 mm so the bottle sets down fully.
   Set-down height = `TABLE_Z` + (grasp height − bottle bottom), from each run's measurement.
+- **Pre-grasp distance limit** `max_pre_mm` = 1100 mm (was a fixed 700): the plan refuses a pre-grasp farther than
+  this from where the arm looked. Normally it is about 310 mm from `NewMid`. The xArm6 reaches about 700 mm, so a
+  reading near 1000 mm usually means YOLO picked a bottle in the background: check the target before confirming.
 - Collision stop is off on `arm`; nothing models the bottles. The carry and reset paths were checked in simulation
   against the box and a placed bottle, not against arm 2: keep arm 2 clear of the place spot.
 

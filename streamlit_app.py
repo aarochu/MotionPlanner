@@ -418,14 +418,22 @@ def confirm_go(idx):
 
 
 @st.dialog("Run sequence")
-def confirm_run(selection):
-    poses = poses_io.sequence(load_poses(), selection)
+def confirm_run(selection, first=None, last=None):
+    """Play the steps of `selection`, optionally only steps first..last (0-based, inclusive)."""
+    steps = poses_io.sequence(load_poses(), selection)
     label = poses_io.RUN_OPTIONS[selection]
-    if not poses:
+    if not steps:
         st.warning(f"No keyframes saved for {label}.")
         return
+    first = 0 if first is None else first
+    last = len(steps) - 1 if last is None else last
+    poses = steps[first:last + 1]
     counts = {a: sum(p["arm"] == a for p in poses) for a in poses_io.ARMS}
-    st.write(f"Play **{len(poses)}** step(s) for **{label}**, one move at a time?")
+    if len(poses) < len(steps):
+        st.write(f"Play steps **{first + 1}–{last + 1}** of {len(steps)} for **{label}** "
+                 f"({poses[0]['name']} → {poses[-1]['name']}), one move at a time?")
+    else:
+        st.write(f"Play **{len(poses)}** step(s) for **{label}**, one move at a time?")
     if selection == "arm_then_arm2":
         st.caption(f"First all {counts['arm']} arm keyframe(s), then all {counts['arm2']} arm2 keyframe(s). "
                    "The two arms never move at the same time.")
@@ -1095,12 +1103,22 @@ else:
                          horizontal=True, key="run_selection",
                          help="arm, then arm2: all of arm's keyframes first, then all of arm2's, whatever the "
                               "table order.")
-    chosen = poses_io.sequence(poses, selection)
-    st.caption(f"{len(chosen)} step(s) selected · total programmed delay "
+    all_steps = poses_io.sequence(poses, selection)
+    first, last = 0, len(all_steps) - 1
+    if len(all_steps) > 1:
+        labels = [f"{n}. {p['arm']} · {p['name']}" for n, p in enumerate(all_steps, 1)]
+        # the key changes with the step list, so a stale range never points at steps that moved or were deleted
+        start_label, end_label = st.select_slider(
+            "Run from … to …", options=labels, value=(labels[0], labels[-1]),
+            key=f"run_range_{selection}_{hash(tuple(labels))}",
+            help="Drag either end to run only part of the sequence. Both ends are included.")
+        first, last = labels.index(start_label), labels.index(end_label)
+    chosen = all_steps[first:last + 1]
+    st.caption(f"{len(chosen)} of {len(all_steps)} step(s) selected · total programmed delay "
                f"{sum(q.get('delay', 0.0) for q in chosen[:-1]):g} s (the last keyframe's delay is ignored)")
     run_c, _ = st.columns([1, 3])
     if run_c.button("▶ Run sequence", type="primary", use_container_width=True, disabled=FULL_RUNNING):
-        confirm_run(selection)
+        confirm_run(selection, first, last)
 
     with st.expander("Export as Python"):
         lines = ["POSES = {"]

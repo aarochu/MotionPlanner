@@ -34,6 +34,7 @@ DEFAULTS = {
     "bottle_diam_mm": 80.0,  # known bottle (Saratoga 28 oz); it fits the opening, so the measured width is only a
                              # sanity check: silhouette widths read high (tape band, edge blur, a cut-off box)
     "max_width_mm": 115.0,   # wider than this is not one bottle (e.g. two bottles in one detection): refuse
+    "max_pre_mm": 1100.0,    # refuse a pre-grasp farther than this from where the arm looked (was 700)
     "finger_mm": 12.0,       # finger thickness outside the opening
     "grip_half_h_mm": 40.0,  # gripper body + fingers reach this far below/above the grasp height
     "max_spread_mm": 10.0,   # frames must agree within this (bottle axis, horizontal)
@@ -285,8 +286,9 @@ def plan(m, cfg):
         else:
             c.append(("ok", f"Neighbour clear: edge {abs(s):.0f} mm to the side (finger reaches {outer:.0f}), "
                             f"{t:+.0f} mm along the approach (fingertips reach {tip:+.0f})."))
-    if np.linalg.norm(d_pre) > 700:   # NewMid is ~310 mm from the pre-grasp; each look-again backup adds 100
-        c.append(("error", f"Pre-grasp is {np.linalg.norm(d_pre):.0f} mm away; over the 700 mm limit."))
+    if np.linalg.norm(d_pre) > cfg.get("max_pre_mm", 1100.0):   # NewMid is ~310 mm from the pre-grasp normally
+        c.append(("error", f"Pre-grasp is {np.linalg.norm(d_pre):.0f} mm away; over the "
+                           f"{cfg.get('max_pre_mm', 1100.0):.0f} mm limit."))
     if (A - T0).dot(a) < cfg["pre_mm"] - 1:
         c.append(("error", "The bottle is already closer than the pre-grasp distance; back off first."))
     return p
@@ -411,7 +413,8 @@ def preview(run, robot, cam, service="bottle-yolo", confidence=.65, show_all=Fal
 PLACE_HEADING_DEG = -31.9                           # gripper heading at the place spot (level, fingers horizontal)
 PLACE_XY = (-91.1, -379.5)                          # arm end (flange) x, y at the place spot
 PLACE_ABOVE_JOINTS = [-117.43, 11.48, -39.05, 93.96, 87.93, 207.5]   # flange at PLACE_XY, z 200, level
-TABLE_Z = -8.7          # table top in the arm frame: bottle set down by eye at flange z 104.0 with the pads 112.7 mm
+TABLE_Z = -10.7         # set 2 mm below the original -8.7 so the bottle sets down fully. Table top in the arm frame:
+                        # bottle set down by eye at flange z 104.0 with the pads 112.7 mm
                         # above its measured bottom
 LIFT_MM = 100.0         # straight up after the grab, clear of the box
 SETDOWN_SLOW_MM = 20.0  # the last part of the set-down goes in 5 mm steps
