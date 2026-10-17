@@ -1,0 +1,17 @@
+[project]
+name = "motionplanner"
+version = "0.1.0"
+description = "Streamlit dashboard for teaching, replaying and vision-correcting keyframes on Viam xArm6 arms (two-arm bottle opener)."
+readme = "README.md"
+requires-python = ">=3.11"  # streamlit 1.66 needs 3.11+
+# Same four dependencies (and pins) as the old requirements.txt.
+dependencies = [
+    "streamlit==1.66.0",
+    "viam-sdk==0.84.0",
+    "opencv-python-headless==5.0.0.93",
+    "numpy>=2.2.6",
+]
+
+[tool.uv]
+# An app, not a library: uv manages the environment but doesn't build or install this project as a package.
+package = false

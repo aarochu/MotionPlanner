@@ -3,9 +3,9 @@
 Typical use (Rishi, after pulling this branch): bring your arm2 keyframes in so "arm, then arm2" runs
 Aaron's arm sequence first and then yours.
 
-    .venv/bin/python import_poses.py ~/my_old_poses.json            # imports the arm2 keyframes
-    .venv/bin/python import_poses.py ~/my_old_poses.json --arm arm   # imports arm keyframes instead
-    .venv/bin/python import_poses.py ~/my_old_poses.json --dry-run   # show what would change
+    uv run python import_poses.py ~/my_old_poses.json            # imports the arm2 keyframes
+    uv run python import_poses.py ~/my_old_poses.json --arm arm   # imports arm keyframes instead
+    uv run python import_poses.py ~/my_old_poses.json --dry-run   # show what would change
 
 The source can be the old flat list or the grouped format. Only keyframes for the chosen arm are taken.
 A keyframe whose name already exists for that arm is skipped (use --replace to overwrite it in place).

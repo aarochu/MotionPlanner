@@ -9,3 +9,5 @@ Rules that matter most here:
 - Never commit secrets: credentials live only in `env.sh` (gitignored).
 - No AI co-author or attribution lines in commits or PRs.
 - Machine config changes are live with no undo: ask first and record how to revert.
+- Use uv for everything Python: `uv sync`, `uv run …`, `uv add <pkg>` (never pip). Check your work with
+  `scripts/validate.sh` (offline) or `scripts/validate.sh --live` (read-only against the machine); see `UV.md`.

@@ -1,5 +1,7 @@
 # MotionPlanner
 
+> Uses **uv** for Python and dependencies: `uv sync`, then `./run.sh`. Pulling or validating the repo (people or agents)? See [`UV.md`](UV.md).
+
 A Streamlit dashboard for teaching and replaying hardcoded joint-space keyframes on Viam-controlled
 xArm6 robot arms. It was built for a two-arm bottle-opening project: one arm holds the bottle while the
 other unscrews the cap.
@@ -152,13 +154,21 @@ xArm driver cancels the move in progress, which shows up as `context canceled`.
 
 ## Setup
 
-Requires Python 3.10+.
+The project uses [uv](https://docs.astral.sh/uv/) for Python and dependencies. Install it once (macOS:
+`brew install uv`; other systems: see the uv docs), then:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+uv sync
 cp env.sh.example env.sh
 ```
+
+`uv sync` creates `.venv` with the exact versions pinned in `uv.lock`, on Python 3.13 (from `.python-version`;
+uv downloads it if needed). Python 3.11+ is required, because `streamlit` 1.66 needs it. Run any project command
+through uv, for example `uv run python import_poses.py …`. To check a checkout end to end, run
+`scripts/validate.sh` (add `--live` to also render the dashboard against the machine; see `UV.md`).
+
+Dependencies live in `pyproject.toml`; change them with `uv add` / `uv remove`, which also updates `uv.lock`.
+`requirements.txt` is exported from the lock for anyone not using uv; don't edit it by hand.
 
 Edit `env.sh` and fill in your Viam API key ID and API key. Get them from the Viam app:
 your machine → **Connect** → Code sample. Set `VIAM_MACHINE_ADDRESS` to your machine's address.

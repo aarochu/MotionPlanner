@@ -27,19 +27,19 @@ git checkout combined-sequence
 ```
 
 ```bash
-.venv/bin/pip install -r requirements.txt
+uv sync
 ```
 
 Preview the import first. It should list your arm2 keyframes as "added":
 
 ```bash
-.venv/bin/python import_poses.py ~/rishi_poses_backup.json --dry-run
+uv run python import_poses.py ~/rishi_poses_backup.json --dry-run
 ```
 
 Then import for real (poses.json is backed up to poses.json.bak first):
 
 ```bash
-.venv/bin/python import_poses.py ~/rishi_poses_backup.json
+uv run python import_poses.py ~/rishi_poses_backup.json
 ```
 
 If it says "no arm2 keyframes", your saved keyframes aren't tagged `"arm": "arm2"`; check the file. Untagged

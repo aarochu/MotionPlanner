@@ -8,7 +8,7 @@ Read `README.md` for setup and the full feature list. This file is what you need
 
 ## Start here
 
-1. Follow **Setup** in `README.md`: create the venv, install `requirements.txt`, copy `env.sh.example` to
+1. Follow **Setup** in `README.md`: install uv, run `uv sync`, copy `env.sh.example` to
    `env.sh` and fill in your Viam API key ID and key (Viam app → armfarm16 → Connect → Code sample).
    `env.sh` is gitignored and must never be committed.
 2. Run `./run.sh` and open http://127.0.0.1:8501.

@@ -63,13 +63,18 @@ Arm settings (both): `speed_degs_per_sec: 60` (module default), acceleration at 
 | `vision_config.json` | Saved pink-detection settings (loaded on start; **Save as default** writes it) |
 | `grab_reference.json` | Corrected-grab references; created when taught (not in the repo yet) |
 | `run.sh` / `env.sh.example` | Launcher and credentials template. `env.sh` is gitignored |
+| `pyproject.toml` / `uv.lock` / `.python-version` | Dependencies (uv), exact locked versions, Python 3.13 |
+| `requirements.txt` | Exported from `uv.lock` for non-uv users; don't edit by hand |
+| `scripts/validate.sh`, `scripts/smoke_app.py` | End-to-end checks: locked install, compile, unit tests, optional read-only live render (`--live`) |
+| `UV.md` | How to pull the repo and validate it with uv |
 
 ## 4. Running it
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+uv sync                    # exact versions from uv.lock, Python 3.13 (needs uv: brew install uv)
 cp env.sh.example env.sh   # fill in VIAM_API_KEY_ID and VIAM_API_KEY (Viam app -> Connect -> Code sample)
 ./run.sh                   # http://127.0.0.1:8501
+scripts/validate.sh --live # check the checkout end to end (read-only; see UV.md)
 ```
 
 The sidebar's **Active arm** chooses which arm the jog/gripper/save controls and the camera section act on.
