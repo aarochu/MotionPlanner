@@ -231,8 +231,9 @@ absolute accuracy of positions against a tape measure; the alignment fix's effec
 
 ## 10. Working rules (from the project owner)
 
-- **Never move an arm without the user's go-ahead.** Read-only checks (joint reads, camera frames, transforms)
-  are fine. Moves in the app always go through a confirmation; keep it that way.
+- The Simple tab moves arm 1 directly when you click a button (no separate confirmation dialog). You are responsible
+  for making sure the arm's path is clear before clicking; keep the e-stop in reach. Read-only checks (joint reads,
+  camera frames, transforms) are still safe at any time.
 - **Never commit secrets.** API keys live only in `env.sh` (gitignored). Scan staged changes for keys before
   committing. The machine address is not a secret.
 - **No AI co-author or attribution lines** in commit messages or PRs.
@@ -249,7 +250,7 @@ absolute accuracy of positions against a tape measure; the alignment fix's effec
   `INTRINSICS`, `CAM_ARM`) are set right after the sidebar picks the arm.
 - Headless test pattern: `streamlit.testing.v1.AppTest.from_file("streamlit_app.py").run()` with `env.sh`
   sourced; point `POSES_FILE` / `GRAB_REF_FILE` / `VISION_CONFIG_FILE` at temp copies so real files aren't
-  touched, and never click the confirm buttons ("Yes, move", "Yes, run").
+  touched.
 - Rishi's checkout has an untracked `poses.json`; git refuses to check out a branch that tracks it until it is
   moved aside (`RUN_BOTH.md` covers this).
 - Streamlit prints `use_container_width` deprecation warnings; harmless.

@@ -1137,60 +1137,193 @@ def run_logged(title, fn, *args):
     return out
 
 
-@st.dialog("Reset arm 1")
-def confirm_reset_arm1():
+# ---------- browser text-to-speech (fire-and-forget, client-side) ----------
+TTS_START = ("you look thirsty, let me get you some water.")
+TTS_SARATOGA = (
+    "This is Saratoga Spring Water, an American spring water with a heritage "
+    "dating back to 1872 in Saratoga Springs, New York. "
+    "It's sourced from natural springs in the northeastern United States, "
+    "with a TDS below 150 milligrams per liter and a pH of 6.4 to 6.7. "
+    "It's a low-minerality water, with a light, smooth mouthfeel, subtle "
+    "sweetness, and a crisp, clean finish. Very versatile, particularly with "
+    "delicate foods like sushi and seafood."
+)
+
+
+# ---------- client-side voice selector (populates from the browser's installed voices) ----------
+def voice_selector():
+    """Render a dropdown of the browser's available speech-synthesis voices.
+
+    The choice is saved to localStorage so it survives Streamlit reruns (the
+    dropdown re-renders on every run and used to reset back to voice #1).
+    """
+    html = (
+        "<select id=\"tts-voice-select\" style=\"width:100%; padding:4px;\"></select>\n"
+        "<script>\n"
+        "(function(){\n"
+        "  var synth = window.speechSynthesis;\n"
+        "  if (!synth) return;\n"
+        "  var select = document.getElementById('tts-voice-select');\n"
+        "  var stored = localStorage.getItem('tts_voice_name');\n"
+        "  var loading = document.createElement('option');\n"
+        "  loading.textContent = 'loading voices…';\n"
+        "  select.appendChild(loading);\n"
+        "  function load() {\n"
+        "    var voices = synth.getVoices();\n"
+        "    select.innerHTML = '';\n"
+        "    if (voices.length === 0) {\n"
+        "      var opt = document.createElement('option');\n"
+        "      opt.textContent = '(no voices installed)';\n"
+        "      opt.disabled = true;\n"
+        "      select.appendChild(opt);\n"
+        "      return;\n"
+        "    }\n"
+        "    voices.forEach(function(v) {\n"
+        "      var opt = document.createElement('option');\n"
+        "      opt.value = v.name;\n"
+        "      opt.textContent = v.name + (v.default ? ' (default)' : '');\n"
+        "      if (stored && v.name === stored) opt.selected = true;\n"
+        "      else if (v.default && !stored) opt.selected = true;\n"
+        "      select.appendChild(opt);\n"
+        "    });\n"
+        "  }\n"
+        "  synth.onvoiceschanged = load;\n"
+        "  load();\n"
+        "  var tries = 0;\n"
+        "  var timer = setInterval(function() {\n"
+        "    if (synth.getVoices().length > 0 || tries++ > 20) clearInterval(timer);\n"
+        "    load();\n"
+        "  }, 250);\n"
+        "  select.onchange = function() {\n"
+        "    localStorage.setItem('tts_voice_name', select.value);\n"
+        "  };\n"
+        "})();\n"
+        "</script>\n"
+    )
+    st.components.v1.html(html, height=64)
+
+
+def speak(text: str, voice_name: str | None = None, lang: str = "en-US",
+          rate: float = 1.0, pitch: float = 1.0):
+    """Speak text in the user's browser via the Web Speech API.
+
+    Fire-and-forget: returns immediately and the browser keeps talking while
+    the arm moves. Any utterance already in progress is cancelled first, so
+    only the most recently clicked cue plays.
+
+    If voice_name is given it is matched against the browser's installed
+    voices; otherwise the voice selected in the voice selector (or the browser
+    default) is used.
+    """
+    voice_js = ""
+    if voice_name:
+        voice_js = (
+            "  var v = Array.from(synth.getVoices()).find(function(x){ return x.name === "
+            + json.dumps(voice_name) + " });\n"
+            "  if (v) u.voice = v;\n"
+        )
+    else:
+        voice_js = (
+            "  var vn = localStorage.getItem('tts_voice_name') || '';\n"
+            "  if (vn) {\n"
+            "    var v = Array.from(synth.getVoices()).find(function(x){ return x.name === vn });\n"
+            "    if (v) u.voice = v;\n"
+            "  }\n"
+        )
+    js = (
+        "<script>\n"
+        "(function(){\n"
+        "  var synth = window.speechSynthesis;\n"
+        "  if (!synth) return;\n"
+        "  synth.cancel();\n"
+        "  var u = new SpeechSynthesisUtterance(" + json.dumps(text) + ");\n"
+        "  u.lang = " + json.dumps(lang) + ";\n"
+        "  u.rate = " + json.dumps(rate) + ";\n"
+        "  u.pitch = " + json.dumps(pitch) + ";\n"
+        + voice_js +
+        "  synth.speak(u);\n"
+        "})();\n"
+        "</script>\n"
+    )
+    st.components.v1.html(js, height=0)
+
+
+def stop_speech():
+    """Halt all speech playback immediately (panic button)."""
+    js = (
+        "<script>\n"
+        "(function(){\n"
+        "  var synth = window.speechSynthesis;\n"
+        "  if (synth) synth.cancel();\n"
+        "})();\n"
+        "</script>\n"
+    )
+    st.components.v1.html(js, height=0)
+
+
+def run_reset_arm1():
     parking = arm1_keyframe("parking")
     if parking is None:
         st.error("No joint keyframe named 'parking' for arm.")
         return
-    st.write(f"Open arm 1's gripper. Unless it is already at parking: back straight out {YG.RESET_RETREAT_MM:.0f} mm "
-             f"along the gripper, rise to z {YG.RESET_CLEAR_Z:.0f} mm if lower, then move to **parking**.")
-    st.caption("Lets go of anything arm 1 holds. Arm 2 is not moved. Keep the e-stop in reach.")
-    if st.session_state.get("reset1_yes"):
-        run_logged("Reset arm 1", YG.reset_arm, rpc, ARMS["arm"], GRIPPERS["arm"], parking)
-        st.rerun()
-    st.button("Yes, reset arm 1", type="primary", key="reset1_yes")
+    run_logged("Reset arm 1", YG.reset_arm, rpc, ARMS["arm"], GRIPPERS["arm"], parking)
 
 
-@st.dialog("Run YOLO pick & place", width="large")
-def confirm_pick_place():
+def run_arm2_home():
+    """Move arm2 to its safe_bottle_start_pose (home / parked position)."""
+    kfs = load_poses()
+    kf = next((p for p in kfs if p.get("arm") == "arm2" and p["name"] == "safe_bottle_start_pose"), None)
+    if kf is None:
+        st.error("No arm2 keyframe named 'safe_bottle_start_pose'.")
+        return
+    run_logged("Move arm2 to home", go_to_keyframe, kf)
+
+
+def run_pick_place():
     newmid, parking = arm1_keyframe("NewMid"), arm1_keyframe("parking")
     if newmid is None or parking is None:
         st.error("Arm needs joint keyframes named 'NewMid' and 'parking'.")
         return
     cfg = dict(YG.DEFAULTS)
-    st.markdown(
-        "1. Open the gripper and go to **NewMid** (arm 1 must start at parking or NewMid).\n"
-        f"2. YOLO + depth locate the leftmost bottle ({int(cfg['frames'])} frames). If it is not fully in view, back up "
-        f"{cfg['backup_mm']:.0f} mm in x and look again (up to {int(cfg['max_backups'])} times); any failed check "
-        "stops here.\n"
-        f"3. Level pre-grasp {cfg['pre_mm']:.0f} mm in front, straight in, grab (opens and backs out on a miss).\n"
-        f"4. Lift {YG.LIFT_MM:.0f} mm, carry to above the place spot, set it down at a height worked out from the "
-        "measured bottle, and keep holding it.")
-    st.caption(f"Known bottle {cfg['bottle_diam_mm']:.0f} mm in the {cfg['stroke_mm']:.0f} mm gripper. "
-               f"Grasp trims: {cfg['lat_trim_mm']:+.0f} mm right, {cfg['depth_trim_mm']:+.0f} mm deeper than the "
-               f"bottle axis. Table at z {YG.TABLE_Z:+.1f} mm. Only arm 1 moves: make sure arm 2 is clear of the place "
-               "spot. STOP ALL stops between steps; keep the e-stop in reach.")
-    if st.session_state.get("pickplace_yes"):
-        result = run_logged("YOLO pick & place", YG.pick_and_place, run, rpc, ROBOT, ARMS["arm"], GRIPPERS["arm"],
-                            CAM_RIGS["arm"][0], RIGS["arm"][0], RIGS["arm"][1], newmid, parking, cfg)
-        if result:
-            st.session_state.update(yg_meas=result[0], yg_plan=result[1], yg_cfg_used=cfg)
-        st.rerun()
-    st.button("Yes, run it", type="primary", key="pickplace_yes")
+    speak(TTS_START)
+    result = run_logged("YOLO pick & place", YG.pick_and_place, run, rpc, ROBOT, ARMS["arm"], GRIPPERS["arm"],
+                        CAM_RIGS["arm"][0], RIGS["arm"][0], RIGS["arm"][1], newmid, parking, cfg,
+                        on_grab=lambda: speak(TTS_SARATOGA))
+    if result:
+        st.session_state.update(yg_meas=result[0], yg_plan=result[1], yg_cfg_used=cfg)
+    st.rerun()
 
 
 def simple_view():
     st.subheader("Arm 1")
     st.caption("**Reset** parks arm 1 with the gripper open. **Run** picks the leftmost bottle with YOLO and sets it "
-               "down at the place spot, still holding it. Both ask for confirmation first.")
+               "down at the place spot, still holding it. Clicking moves arm 1 immediately — make sure its path is "
+               "clear first and keep the e-stop in reach.")
     busy = FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running)
     c1, c2 = st.columns(2)
     if c1.button("🏠 Reset arm 1", use_container_width=True, disabled=busy or "arm" not in ARMS, key="simple_reset"):
-        confirm_reset_arm1()
+        run_reset_arm1()
     if c2.button("▶ Run YOLO pick & place", type="primary", use_container_width=True,
                  disabled=busy or "arm" not in ARMS or "arm" not in CAM_RIGS, key="simple_run"):
-        confirm_pick_place()
+        run_pick_place()
+    c3, c4 = st.columns(2)
+    if c3.button("🏠 Move arm2 home", use_container_width=True, disabled=busy or "arm2" not in ARMS,
+                 key="simple_arm2_home"):
+        run_arm2_home()
+    if c4.button("🔇 Stop speech", use_container_width=True, key="tts_stop"):
+        stop_speech()
+
+    st.markdown("---")
+    st.markdown("### Voice cues (browser text-to-speech)")
+    st.caption("Plays in your browser tab independently of arm motion — no arm moves when you click these. "
+               "Pick a voice below, then click a cue. Clicking a new cue stops the previous one.")
+    voice_selector()
+    vc1, vc2 = st.columns(2)
+    if vc1.button("💧 Say 'you look thirsty…'", use_container_width=True, key="tts_start"):
+        speak(TTS_START)
+    if vc2.button("📢 Say Saratoga Spring Water", use_container_width=True, key="tts_after_grab"):
+        speak(TTS_SARATOGA)
+        st.toast("Saratoga Spring Water cue playing in your browser.")
     if busy:
         st.info("The full run or the unscrew is running; wait for it to finish.")
     try:

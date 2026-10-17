@@ -481,11 +481,14 @@ def locate(run, rpc, robot, arm, cam, cam_frame, grip_frame, cfg, check=lambda: 
 
 
 def pick_and_place(run, rpc, robot, arm, gripper, cam, cam_frame, grip_frame, newmid, parking, cfg,
-                   check=lambda: None, log=print):
+                   check=lambda: None, log=print, on_grab=None):
     """From parking or NewMid: NewMid -> YOLO locate (backing up in -x if the bottle is cut off) -> level pre-grasp -> straight in -> grab -> lift ->
     above the place spot -> straight down to a set-down height computed from the measured bottle. Ends holding the
     bottle (arm 1 steadies it for arm2). Returns (measurement, plan). Raises ValueError with a plain reason and
-    leaves the arm somewhere safe when a check fails."""
+    leaves the arm somewhere safe when a check fails.
+
+    on_grab: optional no-arg callable fired right after a successful grab (e.g. to start a fire-and-forget
+    voice cue while lift/carry/place continue). It runs on the same thread as pick_and_place."""
     q = list(rpc(arm.get_joint_positions).values)
     if not (_near(q, newmid) or _near(q, parking)):
         raise ValueError("Arm 1 must start at parking or NewMid. Press Reset arm 1 first.")
@@ -512,6 +515,8 @@ def pick_and_place(run, rpc, robot, arm, gripper, cam, cam_frame, grip_frame, ne
         rpc(gripper.open)
         _straight(rpc, arm, p["pre"], cfg["in_step_mm"], check)
         raise ValueError("The gripper closed on nothing; opened and backed out to the pre-grasp.")
+    if on_grab is not None:
+        on_grab()
     e = _pose(rpc(arm.get_end_position))
     log(f"Lifting {LIFT_MM:.0f} mm")
     _straight(rpc, arm, dict(e, z=e["z"] + LIFT_MM), 20.0, check)
