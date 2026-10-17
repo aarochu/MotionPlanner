@@ -17,14 +17,20 @@ POSE_KEYS = ("x", "y", "z", "o_x", "o_y", "o_z", "theta")
 WRIST = 5                      # Joint 5: wrist twist
 JOINT_MOVE_TOL_DEG = 2.0       # a "joint_move" keyframe may only differ from where the arm is at the wrist
 WAVE_KEYFRAMES = ("right1", "left1", "right2", "left2")   # arm's wrist-wave intro, turned in this order
-WAVE_ACCEL = 1000.0            # joint acceleration (deg/s^2) for wrist-only wave turns (module max 1145) ...
-DEFAULT_ACCEL = 381.67         # ... restored afterwards: the xArm module's default (neither arm's config sets it)
+# Wrist-only wave turns run faster than normal moves; normal values are restored after every turn and on errors.
+WAVE_SPEED = 120.0             # joint speed (deg/s) for wave turns (module range 3-180)
+WAVE_ACCEL = 1145.0            # joint acceleration (deg/s^2) for wave turns (module maximum)
+DEFAULT_SPEED = 60.0           # restored afterwards: both arms' configured speed_degs_per_sec
+DEFAULT_ACCEL = 381.67         # restored afterwards: the xArm module's default (neither arm's config sets it)
+WAVE_MOTION = (WAVE_SPEED, WAVE_ACCEL)
+NORMAL_MOTION = (DEFAULT_SPEED, DEFAULT_ACCEL)
 
 
-def set_accel(run, arms, value):
-    """Set the joint acceleration (deg/s^2) of each xArm in `arms` through its DoCommand."""
+def set_motion(run, arms, motion):
+    """Set joint speed (deg/s) and acceleration (deg/s^2) of each xArm in `arms` through its DoCommand."""
+    speed, accel = motion
     for arm in arms:
-        run(arm.do_command({"set_acceleration": float(value)}))
+        run(arm.do_command({"set_speed": float(speed), "set_acceleration": float(accel)}))
 
 
 class Mover:
@@ -88,11 +94,11 @@ class Mover:
                              f"pose (joints 0-4 are {off:.1f}° away, limit {JOINT_MOVE_TOL_DEG:g}°). "
                              "Play the keyframe before it first.")
         with self._lock:
-            set_accel(self.run, [arm], WAVE_ACCEL)        # quicker wrist turns; restored even if the move fails
+            set_motion(self.run, [arm], WAVE_MOTION)      # faster wrist turns; restored even if the move fails
             try:
                 self.run(arm.move_to_joint_positions(JointPositions(values=target)))
             finally:
-                set_accel(self.run, [arm], DEFAULT_ACCEL)
+                set_motion(self.run, [arm], NORMAL_MOTION)
 
 
 def wave_offsets(poses, arm="arm", base="parking", wave=WAVE_KEYFRAMES):
@@ -182,8 +188,8 @@ def simultaneous_startup(run, arms, grippers, mover, starts, waves, finish=None,
                 log(f"Moving {n} to its wave start, {kf['name']} (motion planner, collision-checked)")
                 mover.go(kf)
         base = {n: [float(v) for v in run(arms[n].get_joint_positions()).values] for n in order}
-        log(f"Joint acceleration {WAVE_ACCEL:.0f}°/s² for the wave (normal {DEFAULT_ACCEL:.0f})")
-        set_accel(run, [arms[n] for n in order], WAVE_ACCEL)
+        log(f"Wave at {WAVE_SPEED:.0f}°/s and {WAVE_ACCEL:.0f}°/s² (normal {DEFAULT_SPEED:.0f}°/s, {DEFAULT_ACCEL:.0f}°/s²)")
+        set_motion(run, [arms[n] for n in order], WAVE_MOTION)
 
         def wrists(offsets, text):
             check()
@@ -202,7 +208,7 @@ def simultaneous_startup(run, arms, grippers, mover, starts, waves, finish=None,
         check()
         log("Opening every gripper, together")
         run(together([grippers[n].open() for n in order]))
-        set_accel(run, [arms[n] for n in order], DEFAULT_ACCEL)   # planned moves at normal acceleration
+        set_motion(run, [arms[n] for n in order], NORMAL_MOTION)   # planned moves at normal speed
         for n in finish:
             check()
             log(f"Moving {n} to {finish[n]['name']} (motion planner, collision-checked)")
@@ -216,7 +222,7 @@ def simultaneous_startup(run, arms, grippers, mover, starts, waves, finish=None,
             except Exception:
                 pass
         try:
-            set_accel(run, [arms[n] for n in order], DEFAULT_ACCEL)
+            set_motion(run, [arms[n] for n in order], NORMAL_MOTION)
         except Exception:
             pass
         raise

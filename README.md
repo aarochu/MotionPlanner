@@ -26,8 +26,9 @@ Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer?
   way (right +59.9°, left −59.5°), where the motion planner could pick either way round. They are refused unless
   joints 0–4 already match (only the wrist turns in place). Every other keyframe stays planned. Re-saving one of
   these keyframes with **Save keyframe** drops the flag; add it back in `poses.json`.
-  Wave turns run at a joint acceleration of 1000°/s² (`WAVE_ACCEL` in `bottle_task.py`; module max 1145), set
-  through the arm's DoCommand just for the turn and restored to the default 381.67 afterwards, even on errors.
+  Wave turns run faster than normal moves: 120°/s and 1145°/s² (`WAVE_SPEED` / `WAVE_ACCEL` in `bottle_task.py`;
+  module limits 180°/s and 1145°/s²), set through the arm's DoCommand just for the turns and restored to
+  60°/s and 381.67°/s² afterwards, even on errors. Planned moves always run at the normal values.
 - **🤝 Simultaneous Start Up** (Simple tab): `arm2` to `safe_bottle_start_pose`, then `arm` to `parking` (planned,
   one at a time), then both wrists do the same wave at the same time (angles read from `arm`'s keyframes, from each
   arm's own start), both grippers close and open, and both end at their starts ready for the sequence.
