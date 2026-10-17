@@ -25,7 +25,7 @@
                  background: var(--success); margin-right: 6px; animation: blink 1.2s infinite; }
   .status .dot.off { background: var(--danger); }
   @keyframes blink { 0%,100%{opacity:.4} 50%{opacity:1} }
-  .container { display: grid; grid-template-columns: 360px 1fr; gap: 0; min-height: calc(100vh - 56px); }
+  .container { display: grid; grid-template-columns: 380px 1fr; gap: 0; min-height: calc(100vh - 56px); }
   aside { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; padding: 16px; }
   main { background: var(--bg); padding: 24px; overflow-y: auto; }
   h2 { font-size: 1rem; margin: 0 0 12px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
@@ -34,6 +34,7 @@
   .section:last-child { margin-bottom: 0; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
   .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .row4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; margin-bottom: 8px; }
   .full { grid-column: 1 / -1; }
   label { font-size: .78rem; color: var(--muted); display: block; margin-bottom: 4px; }
   input[type="text"], input[type="number"], select {
@@ -52,7 +53,9 @@
   button.secondary { background: #333942; }
   button.danger { background: var(--danger); }
   button.danger:hover:not(:disabled) { background: var(--danger-hover); }
+  button.stopall { background: var(--danger); font-weight: 700; letter-spacing: .2px; }
   button.small { padding: 6px 8px; font-size: .8rem; width: auto; }
+  button.small.danger { background: var(--danger); }
   .badge { display: inline-block; font-size: .7rem; padding: 2px 6px; border-radius: 99px;
            background: #1f2228; color: var(--muted); margin-left: 6px; }
   .busy-overlay { position: absolute; inset: 0; background: rgba(0,0,0,.45); border-radius: 8px;
@@ -78,6 +81,7 @@
   .cam-controls select { width: auto; padding: 4px 8px; font-size: .8rem; }
   .disabled-hint { color: var(--muted); font-size: .78rem; margin-top: 6px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
   .flex { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .chip { font-size: .78rem; padding: 4px 8px; border-radius: 4px; background: #1f2228; border: 1px solid var(--border); color: var(--muted); }
   .chip.on { background: #16324f; color: #93c5fd; border-color: #3b82f6; }
@@ -91,6 +95,11 @@
   .setting-row input { width: 110px; }
   .btn-group { display: flex; gap: 6px; }
   .btn-group button { width: auto; }
+  .radio-group { display: flex; gap: 10px; margin-top: 4px; }
+  .radio-group label { font-size: .82rem; color: var(--text); cursor: pointer; display: flex; align-items: center; gap: 4px; margin: 0; }
+  .radio-group input { width: auto; min-width: auto; }
+  .metric { font-size: .8rem; color: var(--muted); margin: 2px 0; }
+  .metric .val { color: var(--text); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -102,6 +111,13 @@
 
 <div class="container">
   <aside>
+    <!-- TOP BAR BUTTONS -->
+    <h2>Controls</h2>
+    <div class="section">
+      <button id="btnStopAll" class="stopall" style="width:100%;">🛑 STOP ALL</button>
+      <p class="disabled-hint" style="margin-top:6px; font-size:.75rem;">Stops every arm, gripper, sequence and unscrew immediately.</p>
+    </div>
+
     <!-- ARM 1 -->
     <h2>Arm 1 <span class="badge" id="arm1Status">idle</span></h2>
     <div class="section">
@@ -126,34 +142,16 @@
     <!-- UNSCREW -->
     <h2>Unscrew (arm 2)</h2>
     <div class="section">
-      <div class="setting-row">
-        <label>Twists</label>
-        <input type="number" id="usTwists" value="4" min="1" max="10">
-      </div>
-      <div class="setting-row">
-        <label>Twist deg</label>
-        <input type="number" id="usTwistDeg" value="90" min="10" max="180">
-      </div>
-      <div class="setting-row">
-        <label>Release pos (0-850)</label>
-        <input type="number" id="usReleasePos" value="500" min="0" max="850">
-      </div>
-      <div class="setting-row">
-        <label>Final lift (mm)</label>
-        <input type="number" id="usFinalLift" value="30" min="0" max="100">
-      </div>
-      <div class="setting-row">
-        <label>Speed (°/s)</label>
-        <input type="number" id="usSpeed" value="20" min="1" max="100">
-      </div>
-      <div class="setting-row">
-        <label>Grip force (%)</label>
-        <input type="number" id="usGripForce" value="50" min="1" max="100">
-      </div>
-      <div class="setting-row">
-        <label style="min-width:150px;">Dry run</label>
-        <input type="checkbox" id="usDryRun" checked style="width:auto; min-width:auto;">
-      </div>
+      <div class="setting-row"><label>Twists</label><input type="number" id="usTwists" value="4" min="1" max="20"></div>
+      <div class="setting-row"><label>Degrees per twist</label><input type="number" id="usTwistDeg" value="120" min="10" max="170"></div>
+      <div class="setting-row"><label>Final lift (mm)</label><input type="number" id="usFinalLift" value="30" min="0" max="100"></div>
+      <div class="setting-row"><label>Grip force (%)</label><input type="number" id="usGripForce" value="60" min="1" max="100"></div>
+      <div class="setting-row"><label>Speed (°/s)</label><input type="number" id="usSpeed" value="60" min="3" max="60"></div>
+      <div class="setting-row"><label>Release opening (0-850)</label><input type="number" id="usRelease" value="500" min="100" max="850"></div>
+      <div class="setting-row"><label style="min-width:150px;">Direction</label>
+        <select id="usDirection"><option value="-1">counter-clockwise (loosen)</option><option value="1">clockwise (tighten)</option></select></div>
+      <div class="setting-row"><label style="min-width:150px;">Dry run</label><input type="checkbox" id="usDryRun" checked style="width:auto; min-width:auto;"></div>
+      <div class="setting-row"><label>Start pose</label><select id="usStartPose"></select></div>
       <div class="row">
         <button id="btnUnscrew" class="danger">🔧 Run unscrew</button>
         <button id="btnUnscrewStop" class="secondary small" disabled>⏹ Stop unscrew</button>
@@ -195,12 +193,23 @@
   <main>
     <!-- JOINTS & JOG -->
     <section class="section">
-      <h2>Joints &amp; jog</h2>
-      <div id="jointsGrid" class="grid2"></div>
+      <h2>Live joints &amp; jog</h2>
+      <div id="jointsGrid" class="grid6"></div>
       <div class="row">
         <label>Jog step (deg)</label>
-        <input type="number" id="jogStep" value="5" min="0.5" max="45" step="0.5">
+        <input type="number" id="jogStep" value="2" min="0.5" max="45" step="0.5">
       </div>
+    </section>
+
+    <!-- MOVE TO JOINT ANGLES -->
+    <section class="section">
+      <h2>Move to joint angles</h2>
+      <div class="grid6" id="jointTargets"></div>
+      <div class="btn-group" style="margin-top:8px;">
+        <button id="btnLoadCurrent" class="secondary small">Load current</button>
+        <button id="btnMoveTargets" class="small danger">Move</button>
+      </div>
+      <p class="disabled-hint" style="margin-top:6px; font-size:.75rem;">Type target angles per joint, then click Move.</p>
     </section>
 
     <!-- CAMERA -->
@@ -215,19 +224,118 @@
         <button class="small" id="btnCamRefresh">refresh</button>
         <label style="margin:0; font-size:.75rem; color:var(--muted);">camera:</label>
         <select id="camSelect" style="width:auto;"></select>
+        <label style="margin:0 0 0 8px; font-size:.75rem; color:var(--muted);">depth:</label>
+        <select id="camView" style="width:auto;">
+          <option value="color">Color</option>
+          <option value="depth">Depth</option>
+        </select>
       </div>
+    </section>
+
+    <!-- YOLO STEP-BY-STEP -->
+    <section class="section" id="yoloPanel">
+      <h2>YOLO head-on grab (arm 1)</h2>
+      <p style="font-size:.78rem; color:var(--muted); margin-bottom:8px;">
+        Step-by-step: locate → pre-grasp → grab. Nothing moves until you confirm each step.
+      </p>
+      <div class="setting-row"><label>Min YOLO confidence</label><input type="number" id="ycConf" value="0.5" min="0.1" max="0.95" step="0.05"></div>
+      <div class="setting-row"><label>Frames to measure</label><input type="number" id="ycFrames" value="3" min="1" max="10"></div>
+      <div class="setting-row"><label>Bottle radius (mm)</label><input type="number" id="ycRadius" value="40" min="10" max="80"></div>
+      <div class="setting-row"><label>Pre-grasp distance (mm)</label><input type="number" id="ycPre" value="100" min="60" max="200"></div>
+      <div class="setting-row"><label>Lateral trim (+ = right, mm)</label><input type="number" id="ycLat" value="18" min="-50" max="50"></div>
+      <div class="setting-row"><label>Depth trim (+ = deeper, mm)</label><input type="number" id="ycDepth" value="20" min="-40" max="40"></div>
+      <div class="setting-row"><label style="min-width:150px;">Level gripper on approach</label><input type="checkbox" id="ycLevel" checked style="width:auto; min-width:auto;"></div>
+      <div class="row">
+        <button id="btnYoloLocate" class="danger">🔍 Locate leftmost bottle</button>
+      </div>
+      <div id="yoloResult" style="margin-top:8px; font-size:.78rem;"></div>
+      <div class="busy-overlay" id="busyYolo"><div class="spinner"></div><div>YOLO moving…</div></div>
+      <div class="row3" style="margin-top:8px;">
+        <button id="btnYoloPre" class="secondary small">1 · Move to pre-grasp</button>
+        <button id="btnYoloGrab" class="secondary small">2 · Go in and grab</button>
+        <button id="btnYoloBack" class="secondary small">↩ Back out</button>
+      </div>
+      <h3>Nudge (straight, orientation kept)</h3>
+      <div class="setting-row"><label>Nudge step (mm)</label><input type="number" id="ygNudge" value="5" min="1" max="20"></div>
+      <div class="grid6">
+        <button class="small" onclick="ygNudge('left')">← Left</button>
+        <button class="small" onclick="ygNudge('up')">↑ Up</button>
+        <button class="small" onclick="ygNudge('right')">Right →</button>
+        <button class="small" onclick="ygNudge('out')">Out</button>
+        <button class="small" onclick="ygNudge('down')">↓ Down</button>
+        <button class="small" onclick="ygNudge('in')">In</button>
+      </div>
+      <div class="btn-group" style="margin-top:8px;">
+        <button id="btnYoloLevel" class="secondary small">⚖ Level gripper</button>
+        <button class="small" onclick="ygYaw(1)">⟲ Yaw left 1°</button>
+        <button class="small" onclick="ygYaw(-1)">Yaw right 1° ⟳</button>
+      </div>
+      <p class="disabled-hint" style="margin-top:6px; font-size:.75rem;">Nudge/level/yaw move immediately. Grab buttons need confirmation (handled by backend).</p>
+    </section>
+
+    <!-- CAP DETECTION + ALIGN (arm 2) -->
+    <section class="section" id="capPanel">
+      <h2>Cap detection + Align (arm 2)</h2>
+      <p style="font-size:.78rem; color:var(--muted); margin-bottom:8px;">
+        Hough-circle cap detection on cam2. Align moves gripper2 over the cap (max 100 mm per press).
+      </p>
+      <div class="setting-row"><label>Min radius (px)</label><input type="number" id="cdMinR" value="40" min="10" max="400"></div>
+      <div class="setting-row"><label>Max radius (px)</label><input type="number" id="cdMaxR" value="250" min="10" max="400"></div>
+      <div class="setting-row"><label>Strictness (Hough threshold)</label><input type="number" id="cdSens" value="50" min="20" max="120"></div>
+      <div class="setting-row"><label>Min silver (0-1)</label><input type="number" id="cdSilver" value="0.5" min="0" max="1" step="0.05"></div>
+      <div class="setting-row"><label>Min rim (0-1)</label><input type="number" id="cdRim" value="0.55" min="0" max="1" step="0.05"></div>
+      <div class="setting-row"><label>Cap diameter (mm)</label><input type="number" id="cdCapD" value="30" min="5" max="150" step="0.5"></div>
+      <div class="row">
+        <button id="btnCapDetect" class="danger">🎯 Detect cap</button>
+      </div>
+      <div id="capResult" style="margin-top:8px; font-size:.78rem;"></div>
+      <div id="capImgWrap" style="margin-top:8px;"></div>
+      <div class="busy-overlay" id="busyCap"><div class="spinner"></div><div>detecting…</div></div>
+      <h3>Align gripper2 to cap</h3>
+      <div class="setting-row"><label>Hover above circle (mm)</label><input type="number" id="alHover" value="80" min="20" max="300"></div>
+      <div class="setting-row"><label style="min-width:150px;">Keep height</label><input type="checkbox" id="alKeepH" checked style="width:auto; min-width:auto;"></div>
+      <div class="row">
+        <button id="btnAlignPlan" class="secondary small">Compute align plan</button>
+        <button id="btnAlignMove" class="small danger">Move to plan</button>
+      </div>
+      <div id="alignResult" style="margin-top:8px; font-size:.78rem;"></div>
+      <div class="busy-overlay" id="busyAlign"><div class="spinner"></div><div>aligning…</div></div>
+      <p class="disabled-hint" style="margin-top:6px; font-size:.75rem;">Max 100 mm per align press. Run again if the full correction is larger.</p>
+    </section>
+
+    <!-- YOLO ANNOTATED PREVIEW -->
+    <section class="section">
+      <h2>YOLO bottle preview (arm 1 camera)</h2>
+      <p style="font-size:.78rem; color:var(--muted); margin-bottom:8px;">
+        Watch bottle detection from cam at any arm position. Green marks the leftmost visible bottle; yellow marks others.
+        This viewer never moves the arm.
+      </p>
+      <div class="row3">
+        <label>Confidence</label>
+        <input type="number" id="ypConf" value="0.65" min="0.1" max="1" step="0.05" style="width:70px;">
+        <label style="min-width:150px;">Show other objects</label>
+        <input type="checkbox" id="ypShowAll" style="width:auto; min-width:auto;">
+      </div>
+      <div class="row">
+        <button id="btnYoloPreviewRefresh" class="danger">🔄 Refresh YOLO preview</button>
+      </div>
+      <div id="ypImgWrap" style="margin-top:8px;"></div>
+      <div id="ypResult" style="margin-top:8px; font-size:.78rem;"></div>
     </section>
 
     <!-- KEYFRAMES -->
     <section class="section">
       <h2>Keyframes</h2>
-      <div class="flex">
+      <div class="flex" style="margin-bottom:8px;">
         <input type="text" id="kfName" placeholder="keyframe name">
-        <button id="btnSaveKf">save current pose</button>
+        <select id="kfKind"><option value="pose">XYZ + orientation</option><option value="joints">Joints</option></select>
+        <select id="kfGrip"><option value="none">none</option><option value="grab">grab</option><option value="open">open</option></select>
+        <input type="number" id="kfDelay" value="0" min="0" max="600" step="0.5" style="width:90px;" placeholder="delay (s)">
+        <button id="btnSaveKf">💾 Save current pose</button>
         <button id="btnLoadPoses" class="secondary">reload poses.json</button>
       </div>
       <table id="kfTable">
-        <thead><tr><th>arm</th><th>name</th><th>values</th><th>gripper</th><th>go</th></tr></thead>
+        <thead><tr><th>#</th><th>Name</th><th>Arm</th><th>Action / joints / pose</th><th>Gripper</th><th>Delay (s)</th><th>Go</th><th>↑</th><th>↓</th><th>✕</th></tr></thead>
         <tbody></tbody>
       </table>
     </section>
@@ -241,7 +349,6 @@
         <button id="btnRunBoth">▶ Arm 1 → Arm 2</button>
       </div>
       <div class="busy-overlay" id="busySequence"><div class="spinner"></div><div>running sequence…</div></div>
-      <p class="disabled-hint" id="hintSequence" style="margin-top:6px;"></p>
     </section>
 
     <!-- LOG -->
@@ -347,9 +454,9 @@ function busy(show) {
   if (show) busyCount++; else if (busyCount > 0) busyCount--;
   const b = busyCount > 0;
   document.querySelectorAll("button").forEach(btn => btn.disabled = b);
-  // stop buttons stay enabled during busy
   document.querySelectorAll("[id$='Stop']").forEach(btn => btn.disabled = false);
   document.getElementById("btnStopSpeech").disabled = false;
+  document.getElementById("btnStopAll").disabled = false;
   return b;
 }
 
@@ -374,7 +481,6 @@ function setStatus(id, text, kind = "idle") {
   el.textContent = text;
   el.className = "badge";
   if (kind === "busy") el.classList.add("on");
-  else if (kind === "error") { el.textContent = "error"; el.style.color = "var(--danger)"; }
 }
 
 /* ================= connection ================= */
@@ -415,82 +521,134 @@ async function loadArms() {
       o.value = c; o.textContent = c;
       sel.appendChild(o);
     }
+    // unscrew start pose dropdown
+    const usSel = document.getElementById("usStartPose");
+    usSel.innerHTML = '<option value="">(current pose)</option>';
+    try {
+      const poses = await api("/api/poses");
+      const arm2kf = (poses.poses.arm2 || []);
+      for (const kf of arm2kf) {
+        const o = document.createElement("option");
+        o.value = kf.name; o.textContent = kf.name;
+        usSel.appendChild(o);
+      }
+    } catch (e) {}
   } catch (e) {
     log("could not load arms: " + e.message, "err");
   }
 }
 loadArms();
 
+/* ================= STOP ALL ================= */
+document.getElementById("btnStopAll").onclick = async () => {
+  try {
+    await api("/api/arm/arm/stop", { method: "POST" });
+    await api("/api/arm/arm2/stop", { method: "POST" });
+    await api("/api/unscrew/stop", { method: "POST" });
+    await api("/api/full_run/stop", { method: "POST" });
+    log("STOP ALL: all arms and sequences stopped");
+  } catch (e) { log("STOP ALL failed: " + e.message, "err"); }
+};
+
 /* ================= status polling ================= */
 async function pollStatus() {
   try {
     const st = await api("/api/status");
-    // arm1 status
     const a1 = st.arms.arm;
-    if (a1 && !a1.error) setStatus("arm1Status", "idle");
-    // arm2 status
     const a2 = st.arms.arm2;
-    if (a2 && !a2.error) setStatus("arm2Status", "idle");
-    // unscrew
     if (st.unscrew && st.unscrew.state !== "idle") {
       setStatus("arm2Status", st.unscrew.step, "busy");
       document.getElementById("btnUnscrewStop").disabled = false;
     } else {
       document.getElementById("btnUnscrewStop").disabled = true;
     }
-    // full run
     if (st.full_run && st.full_run.state !== "idle") {
       setStatus("arm1Status", st.full_run.step, "busy");
       document.getElementById("btnFullRunStop").disabled = false;
     } else {
       document.getElementById("btnFullRunStop").disabled = true;
     }
-  } catch (e) {
-    // ignore poll errors
-  }
+  } catch (e) { /* ignore */ }
 }
 if (pollTimer) clearInterval(pollTimer);
 pollTimer = setInterval(pollStatus, POLL_MS);
 
 /* ================= joints ================= */
+function buildJointBox(arm, j, pos) {
+  const box = document.createElement("div");
+  box.style.cssText = "background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:8px;";
+  let html = `<div style="font-weight:600; color:var(--accent); margin-bottom:6px;">${arm}</div>`;
+  html += `<div style="font-size:.72rem; color:var(--muted); margin-bottom:8px;">joints: ${j.values.map(v => v.toFixed(1)).join(", ")}</div>`;
+  html += `<div style="font-size:.72rem; color:var(--muted); margin-bottom:8px;">end: x ${pos.x.toFixed(0)} y ${pos.y.toFixed(0)} z ${pos.z.toFixed(0)}</div>`;
+  // jog buttons
+  const jog = document.createElement("div");
+  jog.style.cssText = "margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;";
+  const step = parseFloat(document.getElementById("jogStep").value || 2);
+  for (let i = 0; i < 6; i++) {
+    for (const dir of [-1, 1]) {
+      const b = document.createElement("button");
+      b.className = "small";
+      b.textContent = `J${i}${dir > 0 ? "+" : "−"}`;
+      b.style.width = "auto";
+      b.onclick = async () => {
+        try {
+          const cur = await api(`/api/arm/${arm}/joints`);
+          const vals = cur.values.map(Number);
+          vals[i] += dir * step;
+          await api(`/api/arm/${arm}/move/joints`, { method: "POST", body: JSON.stringify({ values: vals }) });
+          log(`${arm} jog J${i}${dir > 0 ? "+" : "−"}`);
+        } catch (e) { log("jog failed: " + e.message, "err"); }
+      };
+      jog.appendChild(b);
+    }
+  }
+  box.appendChild(jog);
+
+  // joint target inputs
+  const tgts = document.createElement("div");
+  tgts.style.cssText = "margin-top:8px; display:flex; gap:4px; flex-wrap:wrap;";
+  tgts.innerHTML = `<div style="font-size:.72rem; color:var(--muted); margin-bottom:4px;">Target angles (°)</div>`;
+  const jointNames = ["J0","J1","J2","J3","J4","J5"];
+  for (let i = 0; i < 6; i++) {
+    const inp = document.createElement("input");
+    inp.type = "number";
+    inp.value = j.values[i].toFixed(2);
+    inp.min = -360; inp.max = 360; inp.step = 1;
+    inp.style.width = "55px"; inp.style.fontSize = ".75rem";
+    inp.id = `tgt_${arm}_${i}`;
+    tgts.appendChild(inp);
+  }
+  box.appendChild(tgts);
+  return box;
+}
+
 async function refreshJoints() {
   try {
     const data = await api("/api/arms");
     const grid = document.getElementById("jointsGrid");
+    const tgtGrid = document.getElementById("jointTargets");
     grid.innerHTML = "";
+    tgtGrid.innerHTML = "";
     for (const arm of data.arms) {
       try {
         const j = await api(`/api/arm/${arm}/joints`);
         const pos = await api(`/api/arm/${arm}/position`);
+        grid.appendChild(buildJointBox(arm, j, pos));
+
+        // target inputs (shared grid)
         const box = document.createElement("div");
-        box.style.cssText = "background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:8px;";
-        let html = `<div style="font-weight:600; color:var(--accent); margin-bottom:6px;">${arm}</div>`;
-        html += `<div style="font-size:.72rem; color:var(--muted); margin-bottom:6px;">joints: ${j.values.map(v => v.toFixed(1)).join(", ")}</div>`;
-        html += `<div style="font-size:.72rem; color:var(--muted);">end: x ${pos.x.toFixed(0)} y ${pos.y.toFixed(0)} z ${pos.z.toFixed(0)}</div>`;
-        box.innerHTML = html;
-        const jog = document.createElement("div");
-        jog.style.cssText = "margin-top:8px; display:flex; gap:4px; flex-wrap:wrap;";
-        const step = parseFloat(document.getElementById("jogStep").value || 5);
+        box.style.cssText = "background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:8px; min-width:140px;";
+        box.innerHTML = `<div style="font-weight:600; color:var(--accent); margin-bottom:6px;">${arm}</div>`;
         for (let i = 0; i < 6; i++) {
-          for (const dir of [-1, 1]) {
-            const b = document.createElement("button");
-            b.className = "small";
-            b.textContent = `J${i}${dir > 0 ? "+" : "−"}`;
-            b.style.width = "auto";
-            b.onclick = async () => {
-              try {
-                const cur = await api(`/api/arm/${arm}/joints`);
-                const vals = cur.values.map(Number);
-                vals[i] += dir * step;
-                await api(`/api/arm/${arm}/move/joints`, { method: "POST", body: JSON.stringify({ values: vals }) });
-                log(`${arm} jog J${i}${dir > 0 ? "+" : "−"}`);
-              } catch (e) { log("jog failed: " + e.message, "err"); }
-            };
-            jog.appendChild(b);
-          }
+          const inp = document.createElement("input");
+          inp.type = "number";
+          inp.value = j.values[i].toFixed(2);
+          inp.min = -360; inp.max = 360; inp.step = 1;
+          inp.style.width = "55px"; inp.style.fontSize = ".75rem";
+          inp.id = `tgt2_${arm}_${i}`;
+          box.appendChild(inp);
         }
-        box.appendChild(jog);
-        grid.appendChild(box);
+        tgtGrid.appendChild(box);
       } catch (e) {
         log(`could not read ${arm}: ${e.message}`, "err");
       }
@@ -502,6 +660,38 @@ async function refreshJoints() {
 refreshJoints();
 setInterval(refreshJoints, POLL_MS);
 
+/* Load current joint values into target inputs */
+document.getElementById("btnLoadCurrent").onclick = async () => {
+  try {
+    const data = await api("/api/arms");
+    for (const arm of data.arms) {
+      const j = await api(`/api/arm/${arm}/joints`);
+      for (let i = 0; i < 6; i++) {
+        const inp1 = document.getElementById(`tgt_${arm}_${i}`);
+        const inp2 = document.getElementById(`tgt2_${arm}_${i}`);
+        if (inp1) inp1.value = j.values[i].toFixed(2);
+        if (inp2) inp2.value = j.values[i].toFixed(2);
+      }
+    }
+    log("Loaded current joint values into targets");
+  } catch (e) { log("load current failed: " + e.message, "err"); }
+};
+
+document.getElementById("btnMoveTargets").onclick = async () => {
+  try {
+    const data = await api("/api/arms");
+    for (const arm of data.arms) {
+      const vals = [];
+      for (let i = 0; i < 6; i++) {
+        const inp = document.getElementById(`tgt2_${arm}_${i}`);
+        vals.push(parseFloat(inp.value) || 0);
+      }
+      await api(`/api/arm/${arm}/move/joints`, { method: "POST", body: JSON.stringify({ values: vals }) });
+      log(`${arm} moved to target joint angles`);
+    }
+  } catch (e) { log("move targets failed: " + e.message, "err"); }
+};
+
 /* ================= arm actions ================= */
 async function armAction(arm, action) {
   try {
@@ -510,7 +700,6 @@ async function armAction(arm, action) {
   } catch (e) { log(`${arm} gripper ${action} failed: ${e.message}`, "err"); }
 }
 
-/* Reset arm 1 */
 document.getElementById("btnResetArm1").onclick = async () => {
   busy(true);
   setBusyOverlay("busyArm1", true);
@@ -530,7 +719,6 @@ document.getElementById("btnResetArm1").onclick = async () => {
   finally { busy(false); setBusyOverlay("busyArm1", false); setStatus("arm1Status", "idle"); }
 };
 
-/* YOLO pick & place */
 document.getElementById("btnPickPlace").onclick = async () => {
   busy(true);
   setBusyOverlay("busyArm1", true);
@@ -541,11 +729,11 @@ document.getElementById("btnPickPlace").onclick = async () => {
     log("arm 1: starting YOLO pick & place");
     const res = await api("/api/pick_and_place", { method: "POST" });
     log(`pick & place done: ${res.frames} frames, bottle ${res.width_mm?.toFixed(0)} mm wide`);
+    speak("This is Saratoga Spring Water, an American spring water with a heritage dating back to 1872 in Saratoga Springs, New York. It's sourced from natural springs in the northeastern United States, with a TDS below 150 milligrams per liter and a pH of 6.4 to 6.7. It's a low-minerality water, with a light, smooth mouthfeel, subtle sweetness, and a crisp, clean finish. Very versatile, particularly with delicate foods like sushi and seafood.");
   } catch (e) { log("pick & place failed: " + e.message, "err"); }
   finally { busy(false); setBusyOverlay("busyArm1", false); setStatus("arm1Status", "idle"); }
 };
 
-/* Arm 2 home */
 document.getElementById("btnArm2Home").onclick = async () => {
   busy(true);
   setBusyOverlay("busyArm2", true);
@@ -575,12 +763,14 @@ document.getElementById("btnUnscrewDescribe").onclick = async () => {
 document.getElementById("btnUnscrew").onclick = async () => {
   const req = {
     twists: parseInt(document.getElementById("usTwists").value) || 4,
-    twist_deg: parseFloat(document.getElementById("usTwistDeg").value) || 90,
-    release_pos: parseInt(document.getElementById("usReleasePos").value) || 500,
+    twist_deg: parseFloat(document.getElementById("usTwistDeg").value) || 120,
     final_lift_mm: parseFloat(document.getElementById("usFinalLift").value) || 30,
-    speed_deg_s: parseFloat(document.getElementById("usSpeed").value) || 20,
-    grip_force_pct: parseInt(document.getElementById("usGripForce").value) || 50,
+    grip_force_pct: parseInt(document.getElementById("usGripForce").value) || 60,
+    speed_deg_s: parseFloat(document.getElementById("usSpeed").value) || 60,
+    release_pos: parseInt(document.getElementById("usRelease").value) || 500,
     dry_run: document.getElementById("usDryRun").checked,
+    loosen_sign: parseInt(document.getElementById("usDirection").value) || -1,
+    start_pose: document.getElementById("usStartPose").value || "",
   };
   busy(true);
   setBusyOverlay("busyUnscrew", true);
@@ -626,21 +816,50 @@ async function loadPoses() {
     const data = await api("/api/poses");
     const tbody = document.querySelector("#kfTable tbody");
     tbody.innerHTML = "";
+    let idx = 0;
     for (const [arm, group] of Object.entries(data.poses || {})) {
       for (const kf of group.keyframes || []) {
         const tr = document.createElement("tr");
         const v = kf.values ? kf.values.map(n => n.toFixed(1)).join(", ") :
                 (kf.pose ? `x ${kf.pose.x?.toFixed(0)} y ${kf.pose.y?.toFixed(0)} z ${kf.pose.z?.toFixed(0)}` : "—");
         tr.innerHTML = `
-          <td>${arm}</td>
+          <td>${++idx}</td>
           <td class="key-name">${kf.name}</td>
+          <td>${arm}</td>
           <td class="mono">${v}</td>
           <td>${kf.gripper || "—"}</td>
+          <td><input type="number" value="${kf.delay || 0}" min="0" max="600" step="0.5" style="width:55px;" class="delayInput" data-name="${kf.name}"></td>
           <td><button class="small" onclick="goKf('${arm}', ${JSON.stringify(kf).replace(/"/g, '&quot;')})">go</button></td>
+          <td><button class="small" onclick="moveKfUp(${idx - 1})">↑</button></td>
+          <td><button class="small" onclick="moveKfDown(${idx - 1})">↓</button></td>
+          <td><button class="small danger" onclick="deleteKf(${idx - 1})">✕</button></td>
         `;
         tbody.appendChild(tr);
       }
     }
+    // wire delay inputs
+    document.querySelectorAll(".delayInput").forEach(inp => {
+      inp.addEventListener("change", async () => {
+        const name = inp.dataset.name;
+        const val = parseFloat(inp.value) || 0;
+        try {
+          await api("/api/poses/reorder", {
+            method: "POST",
+            body: JSON.stringify({ poses: (await api("/api/poses")).poses }) // placeholder - delays handled server side via save
+          });
+          // Actually save with delay: re-fetch poses, update delay, save
+          const pdata = await api("/api/poses");
+          let all = [];
+          for (const [a, g] of Object.entries(pdata.poses || {})) {
+            for (const k of g.keyframes || []) {
+              if (k.name === name) k.delay = val;
+              all.push(k);
+            }
+          }
+          await api("/api/poses/reorder", { method: "POST", body: JSON.stringify({ poses: all }) });
+        } catch (e) { log("delay save failed: " + e.message, "err"); }
+      });
+    });
   } catch (e) { log("load poses failed: " + e.message, "err"); }
 }
 
@@ -656,6 +875,44 @@ window.goKf = async (arm, kf) => {
   } catch (e) { log(`go ${kf.name} failed: ${e.message}`, "err"); }
 };
 
+window.moveKfUp = async (i) => {
+  try {
+    const poses = (await api("/api/poses/reorder", { method: "POST", body: JSON.stringify({ poses: (await api("/api/poses")).poses }) })) // no-op
+    // get full list, swap, save
+    const data = await api("/api/poses");
+    let all = [];
+    for (const [a, g] of Object.entries(data.poses || {})) {
+      for (const k of g.keyframes || []) all.push(k);
+    }
+    if (i > 0) { [all[i-1], all[i]] = [all[i], all[i-1]]; await api("/api/poses/reorder", { method: "POST", body: JSON.stringify({ poses: all }) }); await loadPoses(); }
+  } catch (e) { log("reorder failed: " + e.message, "err"); }
+};
+
+window.moveKfDown = async (i) => {
+  try {
+    const data = await api("/api/poses");
+    let all = [];
+    for (const [a, g] of Object.entries(data.poses || {})) {
+      for (const k of g.keyframes || []) all.push(k);
+    }
+    if (i < all.length - 1) { [all[i], all[i+1]] = [all[i+1], all[i]]; await api("/api/poses/reorder", { method: "POST", body: JSON.stringify({ poses: all }) }); await loadPoses(); }
+  } catch (e) { log("reorder failed: " + e.message, "err"); }
+};
+
+window.deleteKf = async (i) => {
+  try {
+    const data = await api("/api/poses");
+    let all = [];
+    for (const [a, g] of Object.entries(data.poses || {})) {
+      for (const k of g.keyframes || []) all.push(k);
+    }
+    all.splice(i, 1);
+    await api("/api/poses/reorder", { method: "POST", body: JSON.stringify({ poses: all }) });
+    await loadPoses();
+    log("keyframe deleted");
+  } catch (e) { log("delete failed: " + e.message, "err"); }
+};
+
 document.getElementById("btnLoadPoses").onclick = loadPoses;
 
 document.getElementById("btnSaveKf").onclick = async () => {
@@ -664,9 +921,19 @@ document.getElementById("btnSaveKf").onclick = async () => {
   try {
     const arms = (await api("/api/arms")).arms;
     const arm = arms[0] || "arm";
-    const pos = await api(`/api/arm/${arm}/position`);
-    const payload = { arm, name, pose: pos, gripper: null };
-    log(`saved ${name} for ${arm} (pose keyframe)`);
+    const kind = document.getElementById("kfKind").value;
+    const grip = document.getElementById("kfGrip").value;
+    const delay = parseFloat(document.getElementById("kfDelay").value) || 0;
+    const payload = { arm, name, kind, gripper: grip === "none" ? null : grip, delay };
+    if (kind === "pose") {
+      const pos = await api(`/api/arm/${arm}/position`);
+      payload.pose = pos;
+    } else {
+      const j = await api(`/api/arm/${arm}/joints`);
+      payload.values = j.values;
+    }
+    await api("/api/poses/save", { method: "POST", body: JSON.stringify(payload) });
+    log(`saved ${name} for ${arm} (${kind})`);
     document.getElementById("kfName").value = "";
     await loadPoses();
   } catch (e) { log("save keyframe failed: " + e.message, "err"); }
@@ -678,14 +945,14 @@ async function runSequence(kind) {
   setBusyOverlay("busySequence", true);
   setStatus("arm1Status", "sequence", "busy");
   try {
-    const poses = await api("/api/poses");
+    const data = await api("/api/poses");
     let keyframes = [];
     if (kind === "arm1") {
-      keyframes = (poses.poses.arm || []).map(k => ({ ...k, arm: "arm" }));
+      keyframes = (data.poses.arm || []).map(k => ({ ...k, arm: "arm" }));
     } else if (kind === "arm2") {
-      keyframes = (poses.poses.arm2 || []).map(k => ({ ...k, arm: "arm2" }));
+      keyframes = (data.poses.arm2 || []).map(k => ({ ...k, arm: "arm2" }));
     } else {
-      keyframes = [...(poses.poses.arm || []), ...(poses.poses.arm2 || [])]
+      keyframes = [...(data.poses.arm || []), ...(data.poses.arm2 || [])]
         .map(k => ({ ...k, arm: k.arm || "arm" }));
     }
     await api("/api/poses/run", { method: "POST", body: JSON.stringify({ keyframes }) });
@@ -702,9 +969,11 @@ document.getElementById("btnRunBoth").onclick = () => runSequence("both");
 async function refreshCam() {
   const sel = document.getElementById("camSelect");
   const cam = sel.value;
+  const view = document.getElementById("camView").value;
   if (!cam) return;
+  const endpoint = view === "depth" ? `/api/camera/${cam}/frame` : `/api/camera/${cam}/preview`;
   try {
-    const data = await api(`/api/camera/${cam}/frame`);
+    const data = await api(endpoint);
     const img = document.getElementById("camImg");
     img.src = "data:image/jpeg;base64," + data.jpeg_base64;
     document.getElementById("camEmpty").style.display = "none";
@@ -736,7 +1005,172 @@ document.getElementById("btnCamToggle").onclick = async () => {
 };
 document.getElementById("btnCamRefresh").onclick = refreshCam;
 document.getElementById("camSelect").addEventListener("change", refreshCam);
+document.getElementById("camView").addEventListener("change", refreshCam);
 setTimeout(refreshCam, 800);
+
+/* ================= YOLO step-by-step ================= */
+async function yoloLocate() {
+  const cfg = {
+    conf: parseFloat(document.getElementById("ycConf").value) || 0.5,
+    frames: parseInt(document.getElementById("ycFrames").value) || 3,
+    radius: parseFloat(document.getElementById("ycRadius").value) || 40,
+    pre_mm: parseFloat(document.getElementById("ycPre").value) || 100,
+    lat_trim_mm: parseFloat(document.getElementById("ycLat").value) || 18,
+    depth_trim_mm: parseFloat(document.getElementById("ycDepth").value) || 20,
+    level: document.getElementById("ycLevel").checked,
+  };
+  try {
+    const res = await api("/api/yolo/locate", { method: "POST", body: JSON.stringify(cfg) });
+    document.getElementById("yoloResult").innerHTML = `
+      <div style="font-size:.78rem;">
+        <div class="metric">Bottle axis: <span class="val">${res.bottle_x}, ${res.bottle_y}</span> mm</div>
+        <div class="metric">Grasp z: <span class="val">${res.grasp_z}</span> mm · width: <span class="val">${res.width_mm}</span> mm · height: <span class="val">${res.height_mm}</span> mm</div>
+        <div class="metric">Camera to bottle: <span class="val">${res.camera_to_bottle_mm}</span> mm · frames: <span class="val">${res.frames}/${res.of}</span></div>
+        ${res.checks.map(c => `<div class="metric ${c[0]}">${c[1]}</div>`).join('')}
+      </div>`;
+    log(`YOLO locate: ${res.frames}/${res.of} frames, bottle ${res.width_mm} mm wide`);
+  } catch (e) { log("YOLO locate failed: " + e.message, "err"); }
+}
+
+document.getElementById("btnYoloLocate").onclick = yoloLocate;
+
+async function yoloMove(kind) {
+  try {
+    const res = await api("/api/yolo/move", { method: "POST", body: JSON.stringify({ kind }) });
+    log(`YOLO ${kind}: ${res.note || res.status}`);
+  } catch (e) { log(`YOLO ${kind} failed: ${e.message}`, "err"); }
+}
+document.getElementById("btnYoloPre").onclick = () => yoloMove("pre");
+document.getElementById("btnYoloGrab").onclick = () => yoloMove("grab");
+document.getElementById("btnYoloBack").onclick = () => yoloMove("back");
+
+window.ygNudge = async (dir) => {
+  const mm = parseFloat(document.getElementById("ygNudge").value) || 5;
+  try {
+    await api("/api/yolo/nudge", { method: "POST", body: JSON.stringify({ direction: dir, mm }) });
+    log(`nudge ${dir} ${mm} mm`);
+  } catch (e) { log("nudge failed: " + e.message, "err"); }
+};
+
+window.ygYaw = async (deg) => {
+  try {
+    await api("/api/yolo/yaw", { method: "POST", body: JSON.stringify({ deg }) });
+    log(`yaw ${deg}°`);
+  } catch (e) { log("yaw failed: " + e.message, "err"); }
+};
+
+document.getElementById("btnYoloLevel").onclick = async () => {
+  try {
+    const res = await api("/api/yolo/level", { method: "POST" });
+    log(`level gripper: ${res.turn_deg}° turn`);
+  } catch (e) { log("level failed: " + e.message, "err"); }
+};
+
+/* ================= Cap detection ================= */
+async function capDetect() {
+  const req = {
+    min_r: parseInt(document.getElementById("cdMinR").value) || 40,
+    max_r: parseInt(document.getElementById("cdMaxR").value) || 250,
+    sensitivity: parseInt(document.getElementById("cdSens").value) || 50,
+    min_silver: parseFloat(document.getElementById("cdSilver").value) || 0.5,
+    min_rim: parseFloat(document.getElementById("cdRim").value) || 0.55,
+    cap_d: parseFloat(document.getElementById("cdCapD").value) || 30,
+  };
+  busy(true);
+  setBusyOverlay("busyCap", true);
+  try {
+    const res = await api("/api/cap/detect", { method: "POST", body: JSON.stringify(req) });
+    const wrap = document.getElementById("capImgWrap");
+    wrap.innerHTML = "";
+    if (res.jpeg_base64) {
+      const img = document.createElement("img");
+      img.src = "data:image/jpeg;base64," + res.jpeg_base64;
+      img.style.maxWidth = "100%";
+      img.style.border = "1px solid var(--border)";
+      img.style.borderRadius = "4px";
+      wrap.appendChild(img);
+    }
+    let html = `<div class="metric">Circles found: <span class="val">${res.circles.length}</span> · rejected: <span class="val">${res.rejected.length}</span></div>`;
+    if (res.circles.length > 0) {
+      const c = res.circles[0];
+      window.lastCircle = { u: c.u, v: c.v, r: c.r };
+      html += `<div class="metric ok">Using circle #1: (${c.u}, ${c.v}) r ${c.r} px for align</div>`;
+    }
+    res.circles.forEach((c, i) => {
+      if (i > 0) html += `<div class="metric">#${i+1}: (${c.u}, ${c.v}) r ${c.r} px · world x ${c.x} y ${c.y} z ${c.z} mm · ${c.method}</div>`;
+    });
+    document.getElementById("capResult").innerHTML = html;
+    log(`Cap detection: ${res.circles.length} circles, ${res.rejected.length} rejected`);
+  } catch (e) { log("cap detect failed: " + e.message, "err"); }
+  finally { busy(false); setBusyOverlay("busyCap", false); }
+}
+
+document.getElementById("btnCapDetect").onclick = capDetect;
+
+/* ================= Align ================= */
+async function alignPlan() {
+  const c = window.lastCircle;
+  if (!c) { log("No circle detected. Run Detect cap first.", "warn"); return; }
+  const req = {
+    circle_x: c.u, circle_y: c.v, circle_r: c.r,
+    hover: parseFloat(document.getElementById("alHover").value) || 80,
+    keep_height: document.getElementById("alKeepH").checked,
+  };
+  try {
+    const plan = await api("/api/align/plan", { method: "POST", body: JSON.stringify(req) });
+    document.getElementById("alignResult").innerHTML = `
+      <div class="metric">Cap world: x ${plan.cap_world.x} y ${plan.cap_world.y} z ${plan.cap_world.z} mm</div>
+      <div class="metric">Gripper world: x ${plan.grip_world.x} y ${plan.grip_world.y} z ${plan.grip_world.z} mm</div>
+      <div class="metric">Move: x ${plan.delta.x:+.1f} y ${plan.delta.y:+.1f} z ${plan.delta.z:+.1f} mm · distance ${plan.norm} mm</div>
+      ${plan.clamped ? `<div class="metric warn">Clamped to 100 mm max. Run Align again afterwards.</div>` : ""}
+    `;
+    window.lastCircle.plan = plan;
+    log(`Align plan: ${plan.norm} mm move, clamped=${plan.clamped}`);
+  } catch (e) { log("align plan failed: " + e.message, "err"); }
+}
+
+async function alignMove() {
+  if (!window.lastCircle || !window.lastCircle.plan) { log("No align plan. Click Compute align plan first.", "warn"); return; }
+  const req = {
+    circle_x: window.lastCircle.u, circle_y: window.lastCircle.v, circle_r: window.lastCircle.r,
+    hover: parseFloat(document.getElementById("alHover").value) || 80,
+    keep_height: document.getElementById("alKeepH").checked,
+  };
+  busy(true);
+  setBusyOverlay("busyAlign", true);
+  setStatus("arm2Status", "aligning", "busy");
+  try {
+    const res = await api("/api/align/move", { method: "POST", body: JSON.stringify(req) });
+    log(`Align move: ${res.norm} mm, clamped=${res.clamped}`);
+  } catch (e) { log("align move failed: " + e.message, "err"); }
+  finally { busy(false); setBusyOverlay("busyAlign", false); setStatus("arm2Status", "idle"); }
+}
+
+document.getElementById("btnAlignPlan").onclick = alignPlan;
+document.getElementById("btnAlignMove").onclick = alignMove;
+
+/* ================= YOLO annotated preview ================= */
+async function yoloPreviewRefresh() {
+  const conf = parseFloat(document.getElementById("ypConf").value) || 0.65;
+  const showAll = document.getElementById("ypShowAll").checked;
+  try {
+    const res = await api(`/api/yolo/preview?confidence=${conf}&show_all=${showAll}`);
+    const wrap = document.getElementById("ypImgWrap");
+    wrap.innerHTML = "";
+    if (res.jpeg_base64) {
+      const img = document.createElement("img");
+      img.src = "data:image/jpeg;base64," + res.jpeg_base64;
+      img.style.maxWidth = "100%";
+      img.style.border = "1px solid var(--border)";
+      img.style.borderRadius = "4px";
+      wrap.appendChild(img);
+    }
+    document.getElementById("ypResult").textContent = `${res.count} bottle(s) at confidence ≥ ${(conf * 100).toFixed(0)}%`;
+    log(`YOLO preview: ${res.count} bottle(s)`);
+  } catch (e) { log("YOLO preview failed: " + e.message, "err"); }
+}
+
+document.getElementById("btnYoloPreviewRefresh").onclick = yoloPreviewRefresh;
 
 /* ================= init ================= */
 loadPoses();

@@ -14,6 +14,8 @@ import json
 import os
 import time
 from pathlib import Path
+
+import numpy as np
 from typing import Any
 
 import importlib.util
@@ -24,9 +26,17 @@ from pydantic import BaseModel
 from robot import (
     connect, disconnect, joints, end_position, move_joint_positions,
     move_position, gripper_action, camera_frame, list_arm_names,
-    list_all_resource_names, arm_stop, gripper_stop,
+    list_all_resource_names, arm_stop, gripper_stop, transform_pose,
+    world_point, capture_frame, yolo_detect, run as viam_run,
 )
-from yolo_grab import DEFAULTS as YOLO_DEFAULTS, pick_and_place as yg_pick_and_place, reset_arm as yg_reset_arm
+_ROBOT = None
+def _get_robot():
+    global _ROBOT
+    if _ROBOT is None:
+        from robot import _robot as r
+        _ROBOT = r._sync_robot()
+    return _ROBOT
+from yolo_grab import (DEFAULTS as YOLO_DEFAULTS, pick_and_place as yg_pick_and_place, reset_arm as yg_reset_arm, measure as yg_measure, plan as yg_plan, level_target as yg_level_target, yaw_target as yg_yaw_target, _unit, _straight)
 from cap_unscrew import UnscrewParams, Unscrewer, describe as unscrew_describe
 from bottle_task import BottleTask, go_to_keyframe as bt_go_to_keyframe, apply_gripper as bt_apply_gripper
 
@@ -37,6 +47,7 @@ _poses_io = importlib.util.module_from_spec(_poses_spec)
 _poses_spec.loader.exec_module(_poses_io)
 sequence = _poses_io.sequence
 load_poses = _poses_io.load
+save_poses = _poses_io.save
 
 app = FastAPI(title="Viam Bottle Opener Backend")
 
@@ -47,6 +58,9 @@ POSES_FILE = Path(os.environ.get("POSES_FILE", str(_REPO_ROOT / "poses.json")))
 # Singletons (created at startup after robot connects)
 _UNSCREWER: Unscrewer | None = None
 _BOTTLE_TASK: BottleTask | None = None
+
+# YOLO step-by-step state (persists between HTTP requests, like Streamlit session state)
+YOLO_STATE = {"meas": None, "plan": None, "cfg": None}
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +82,67 @@ class PoseMove(BaseModel):
 
 class GripperAction(BaseModel):
     action: str  # "grab" or "open"
+
+
+class SavePose(BaseModel):
+    arm: str
+    name: str
+    kind: str  # "joints" or "pose"
+    values: list[float] | None = None
+    pose: dict[str, float] | None = None
+    gripper: str | None = None
+    delay: float | None = None
+
+
+class ReorderPoses(BaseModel):
+    poses: list[dict]
+
+
+class YoloLocate(BaseModel):
+    conf: float | None = None
+    frames: int | None = None
+    radius: float | None = None
+    grasp_frac: float | None = None
+    pad_mm: float | None = None
+    pre_mm: float | None = None
+    stroke_mm: float | None = None
+    lat_trim_mm: float | None = None
+    depth_trim_mm: float | None = None
+    level: bool | None = None
+
+
+class YoloMove(BaseModel):
+    kind: str  # "pre", "grab", "back"
+
+
+class Nudge(BaseModel):
+    direction: str  # left, right, up, down, in, out
+    mm: float = 5.0
+
+
+class LevelGripper(BaseModel):
+    pass
+
+
+class Yaw(BaseModel):
+    deg: float = 1.0
+
+
+class CapDetect(BaseModel):
+    min_r: int = 40
+    max_r: int = 250
+    sensitivity: int = 50
+    min_silver: float = 0.5
+    min_rim: float = 0.55
+    cap_d: float = 30.0
+
+
+class AlignPlan(BaseModel):
+    circle_x: float
+    circle_y: float
+    circle_r: float
+    hover: float = 80.0
+    keep_height: bool = True
 
 
 class Keyframe(BaseModel):
@@ -389,8 +464,292 @@ def api_status() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Keyframes: save, reorder, delete
+# ---------------------------------------------------------------------------
+@app.post("/api/poses/save")
+def api_save_pose(sp: SavePose) -> dict[str, str]:
+    try:
+        poses = load_poses()
+        poses = [p for p in poses if p.get("name") != sp.name]
+        entry = {"arm": sp.arm, "name": sp.name}
+        if sp.kind == "pose" and sp.pose is not None:
+            entry["pose"] = sp.pose
+        elif sp.values is not None:
+            entry["values"] = list(sp.values)
+        if sp.gripper:
+            entry["gripper"] = sp.gripper
+        if sp.delay and sp.delay > 0:
+            entry["delay"] = float(sp.delay)
+        poses.append(entry)
+        save_poses(POSES_FILE, poses)
+        return {"status": "ok", "saved": sp.name}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/poses/reorder")
+def api_reorder_poses(rp: ReorderPoses) -> dict[str, str]:
+    try:
+        poses = rp.poses
+        for p in poses:
+            if "arm" not in p:
+                p["arm"] = "arm"
+        save_poses(POSES_FILE, poses)
+        return {"status": "ok", "count": len(poses)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# YOLO step-by-step (arm 1)
+# ---------------------------------------------------------------------------
+@app.post("/api/yolo/locate")
+def api_yolo_locate(req: YoloLocate | None = None) -> dict[str, Any]:
+    try:
+        cfg = dict(YOLO_DEFAULTS)
+        if req:
+            for k, v in req.model_dump().items():
+                if v is not None:
+                    cfg[k] = v
+        m = yg_measure("arm", "cam", "cam", "gripper", cfg)
+        plan = yg_plan(m, cfg)
+        YOLO_STATE["meas"] = m
+        YOLO_STATE["plan"] = plan
+        YOLO_STATE["cfg"] = cfg
+        return {
+            "status": "ok",
+            "frames": m["frames"],
+            "of": m["of"],
+            "bottle_x": round(m["axis"][0], 1),
+            "bottle_y": round(m["axis"][1], 1),
+            "grasp_z": round(plan["zg"], 1),
+            "width_mm": round(m["width_mm"], 1),
+            "height_mm": round(plan["height_mm"], 1),
+            "camera_to_bottle_mm": round(m["z"], 1),
+            "checks": plan["checks"],
+        }
+    except Exception as exc:
+        YOLO_STATE["meas"] = None
+        YOLO_STATE["plan"] = None
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/yolo/move")
+def api_yolo_move(req: YoloMove) -> dict[str, str]:
+    try:
+        plan = YOLO_STATE["plan"]
+        meas = YOLO_STATE["meas"]
+        cfg = YOLO_STATE["cfg"]
+        if plan is None or meas is None:
+            raise HTTPException(status_code=400, detail="Locate the bottle first.")
+        kind = req.kind
+        if kind == "pre":
+            gripper_action("arm", "open")
+            _straight("arm", plan["pre"], cfg["pre_step_mm"])
+        elif kind == "grab":
+            _straight("arm", plan["grab"], cfg["in_step_mm"])
+            held = gripper_action("arm", "grab")
+            if held is False:
+                gripper_action("arm", "open")
+                _straight("arm", plan["pre"], cfg["in_step_mm"])
+                raise HTTPException(status_code=500, detail="Gripper closed on nothing; backed out to pre-grasp.")
+        elif kind == "back":
+            now = end_position("arm")
+            a = plan["a"]
+            k = sum((now[q] - plan["pre"][q]) * a[idx] for idx, q in enumerate(("x", "y", "z")))
+            if k < 2:
+                return {"status": "ok", "note": "Already at or behind the pre-grasp."}
+            goal = dict(now, x=now["x"] - k * a[0], y=now["y"] - k * a[1], z=now["z"] - k * a[2])
+            _straight("arm", goal, cfg["in_step_mm"])
+        else:
+            raise HTTPException(status_code=400, detail="kind must be 'pre', 'grab', or 'back'")
+        return {"status": "ok", "kind": kind}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/yolo/nudge")
+def api_yolo_nudge(req: Nudge) -> dict[str, str]:
+    try:
+        e = end_position("arm")
+        a = _unit([e["o_x"], e["o_y"], e["o_z"]])
+        up = np.array([0.0, 0.0, 1.0])
+        left = np.cross(up, _unit(a - a.dot(up) * up))
+        dirs = {"left": left, "right": -left, "up": up, "down": -up, "in": a, "out": -a}
+        if req.direction not in dirs:
+            raise HTTPException(status_code=400, detail=f"direction must be one of {list(dirs)}")
+        d = dirs[req.direction] * min(float(req.mm), 20.0)
+        goal = dict(e, x=e["x"] + d[0], y=e["y"] + d[1], z=e["z"] + d[2])
+        move_position("arm", goal["x"], goal["y"], goal["z"],
+                      goal["o_x"], goal["o_y"], goal["o_z"], goal["theta"])
+        return {"status": "ok", "direction": req.direction, "mm": float(req.mm)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/yolo/level")
+def api_yolo_level(_: LevelGripper) -> dict[str, str]:
+    try:
+        e = end_position("arm")
+        PIVOT_MM = 105.0 + YOLO_DEFAULTS["pad_mm"]
+        target, turn = yg_level_target(e, PIVOT_MM)
+        move_position("arm", target["x"], target["y"], target["z"],
+                      target["o_x"], target["o_y"], target["o_z"], target["theta"])
+        return {"status": "ok", "turn_deg": round(turn, 1)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/yolo/yaw")
+def api_yolo_yaw(req: Yaw) -> dict[str, str]:
+    try:
+        e = end_position("arm")
+        PIVOT_MM = 105.0 + YOLO_DEFAULTS["pad_mm"]
+        target, turn = yg_yaw_target(e, req.deg, PIVOT_MM)
+        move_position("arm", target["x"], target["y"], target["z"],
+                      target["o_x"], target["o_y"], target["o_z"], target["theta"])
+        return {"status": "ok", "deg": req.deg, "turn_deg": round(turn, 1)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/yolo/state")
+def api_yolo_state() -> dict[str, Any]:
+    m = YOLO_STATE["meas"]
+    p = YOLO_STATE["plan"]
+    if m is None or p is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "frames": m["frames"],
+        "of": m["of"],
+        "bottle_x": round(m["axis"][0], 1),
+        "bottle_y": round(m["axis"][1], 1),
+        "grasp_z": round(p["zg"], 1),
+        "width_mm": round(m["width_mm"], 1),
+        "height_mm": round(p["height_mm"], 1),
+        "camera_to_bottle_mm": round(m["z"], 1),
+        "checks": p["checks"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cap detection + Align (arm 2)
+# ---------------------------------------------------------------------------
+@app.post("/api/cap/detect")
+def api_cap_detect(req: CapDetect | None = None) -> dict[str, Any]:
+    try:
+        from cap_vision import detect_circles as cv_detect_circles, measure as cv_measure
+        import cv2
+        from robot import capture_frame
+        cap = capture_frame("cam2", "cam2", "arm2")
+        bgr = cap["bgr"]
+        depth = cap["depth"]
+        detect = (req.min_r, req.max_r, req.sensitivity, req.min_silver, req.min_rim) if req else (40, 250, 50, 0.5, 0.55)
+        circles, rejected = cv_detect_circles(bgr, *detect)
+        result = {"circles": [], "rejected": []}
+        for u, v, r, _ in circles:
+            p = cv_measure((u, v, r), depth, req.cap_d if req else 30.0)
+            result["circles"].append({
+                "u": round(u, 1), "v": round(v, 1), "r": round(r, 1),
+                "x": round(p["x"], 1), "y": round(p["y"], 1), "z": round(p["z"], 1),
+                "method": p["method"], "valid": round(p["valid"], 2),
+            })
+        for u, v, r, _ in rejected:
+            result["rejected"].append({"u": round(u, 1), "v": round(v, 1), "r": round(r, 1)})
+        from cap_vision import annotate as cv_annotate
+        img = cv_annotate(bgr, circles, rejected)
+        ok, enc = cv2.imencode(".jpg", img)
+        result["jpeg_base64"] = base64.b64encode(enc.tobytes()).decode("ascii") if ok else None
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/align/plan")
+def api_align_plan(req: AlignPlan) -> dict[str, Any]:
+    try:
+        import numpy as np
+        from robot import transform_pose
+        cap_world = transform_pose("cam2", {"x": req.circle_x, "y": req.circle_y, "z": 0.0,
+                                              "o_x": 0, "o_y": 0, "o_z": 1, "theta": 0}, "arm2_origin")
+        grip_world = transform_pose("gripper2", {"x": 0, "y": 0, "z": 0, "o_x": 0, "o_y": 0, "o_z": 1, "theta": 0}, "arm2_origin")
+        end = end_position("arm2")
+        keep_height = req.keep_height
+        dz = 0.0 if keep_height else cap_world["z"] + req.hover - grip_world["z"]
+        delta = np.array([cap_world["x"] - grip_world["x"],
+                          cap_world["y"] - grip_world["y"],
+                          dz])
+        norm = float(np.linalg.norm(delta))
+        clamped = norm > 100.0
+        if clamped:
+            delta *= 100.0 / norm
+        target = {
+            "x": end["x"] + delta[0], "y": end["y"] + delta[1], "z": end["z"] + delta[2],
+            "o_x": end["o_x"], "o_y": end["o_y"], "o_z": end["o_z"], "theta": end["theta"],
+        }
+        return {
+            "cap_world": {k: round(v, 1) for k, v in cap_world.items()},
+            "grip_world": {k: round(v, 1) for k, v in grip_world.items()},
+            "delta": {k: round(v, 1) for k, v in zip(("x", "y", "z"), delta)},
+            "norm": round(norm, 1),
+            "clamped": clamped,
+            "target": {k: round(v, 3) for k, v in target.items()},
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/align/move")
+def api_align_move(req: AlignPlan) -> dict[str, str]:
+    try:
+        plan = api_align_plan(req)
+        move_position("arm2",
+                      plan["target"]["x"], plan["target"]["y"], plan["target"]["z"],
+                      plan["target"]["o_x"], plan["target"]["o_y"], plan["target"]["o_z"], plan["target"]["theta"])
+        return {"status": "ok", "norm": plan["norm"], "clamped": plan["clamped"]}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Camera: annotated preview images
+# ---------------------------------------------------------------------------
+@app.get("/api/camera/{name}/preview")
+def api_camera_preview(name: str) -> dict[str, Any]:
+    import base64
+    try:
+        jpg = camera_frame(name)
+        return {"jpeg_base64": base64.b64encode(jpg).decode("ascii")}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# YOLO annotated preview (arm 1 camera)
+# ---------------------------------------------------------------------------
+@app.get("/api/yolo/preview")
+def api_yolo_preview(confidence: float = 0.65, show_all: bool = False) -> dict[str, Any]:
+    """Return an annotated JPEG frame from cam with YOLO bottle boxes drawn."""
+    import base64
+    import cv2
+    try:
+        from yolo_grab import preview as yg_preview
+        img, count = yg_preview(viam_run, _get_robot(), "cam", confidence=confidence, show_all=show_all)
+        ok, enc = cv2.imencode(".jpg", img)
+        return {"jpeg_base64": base64.b64encode(enc.tobytes()).decode("ascii") if ok else None, "count": count}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
+
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
     return {"status": "ok"}
