@@ -3,3 +3,4 @@ env.sh
 __pycache__/
 poses.json.bak
 bottle_actions.json
+track_log.jsonl

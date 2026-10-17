@@ -3,6 +3,7 @@
 Config comes from environment variables (see env.sh / run.sh); nothing secret is stored in code.
 """
 import asyncio
+import dataclasses
 import functools
 import json
 import os
@@ -16,6 +17,8 @@ import streamlit as st
 import poses_io
 import vision as V
 import yolo_grab as YG
+import bottle_track as BT
+from cap_vision import CapVision
 from bottle_task import POSE_KEYS, BottleTask, Mover
 from cap_unscrew import UnscrewParams, Unscrewer, describe
 from cap_vision import circle_features, detect_circles  # cap test judged against the table's brightness
@@ -1227,7 +1230,7 @@ def simple_view():
     st.subheader("Arm 1")
     st.caption("**Reset** parks arm 1 with the gripper open. **Run** picks the leftmost bottle with YOLO and sets it "
                "down at the place spot, still holding it. Both ask for confirmation first.")
-    busy = FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running)
+    busy = FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running) or JOB_RUNNER.running
     c1, c2 = st.columns(2)
     if c1.button("🏠 Reset arm 1", use_container_width=True, disabled=busy or "arm" not in ARMS, key="simple_reset"):
         confirm_reset_arm1()
@@ -1252,5 +1255,191 @@ def simple_view():
                  caption=f"Last YOLO locate ({m['cap']['time']}): red cross = grasp point, magenta = open fingertips")
 
 
+# ---------- Simple tab: the whole job in one shot, retryable per step, and the cam2 feed (cap_sequence.py) ----------
+from cap_sequence import DOWN_MM as CAP_DOWN_MM, FAST, NORMAL, Job, JobRunner
+CAP_LOOK_POSE = "open_bottle_cap_up_pose"  # arm2 keyframe over the place spot: gripper down, cam2 sees the bottle top
+
+
+@st.cache_resource
+def get_cam2_vision():
+    if "arm2" not in ARMS or "arm2" not in CAM_RIGS:
+        return None
+    return CapVision(run, ROBOT, ARMS["arm2"], *CAM_RIGS["arm2"], cam="cam2", arm_name="arm2", gripper="gripper2")
+
+
+CAM2_VISION = get_cam2_vision()
+
+
+@st.cache_resource
+def get_job_runner():
+    return JobRunner(), (BT.BottleTracker(run, CAM2_VISION, MOVER) if CAM2_VISION is not None else None)
+
+
+JOB_RUNNER, TRACKER = get_job_runner()
+
+
+def halt_all_arms():
+    for a in ARMS.values():
+        try:
+            run(a.stop())
+        except Exception:
+            pass
+
+
+def build_job(with_arm1, unscrew_params):
+    kfs = {k["name"]: k for k in load_poses() if k.get("arm") == "arm2" and "pose" in k}
+    if CAP_LOOK_POSE not in kfs or TRASH_DROP_POSE not in kfs:
+        raise ValueError(f"Needs arm2 XYZ keyframes '{CAP_LOOK_POSE}' and '{TRASH_DROP_POSE}'.")
+    pick = None
+    if with_arm1:
+        newmid, parking = arm1_keyframe("NewMid"), arm1_keyframe("parking")
+        if newmid is None or parking is None:
+            raise ValueError("Arm needs joint keyframes named 'NewMid' and 'parking'.")
+        cfg = dict(YG.DEFAULTS)
+
+        def pick(check, log):
+            YG.pick_and_place(run, rpc, ROBOT, ARMS["arm"], GRIPPERS["arm"], CAM_RIGS["arm"][0], RIGS["arm"][0],
+                              RIGS["arm"][1], newmid, parking, cfg, check=check, log=log, move_joints=plan_arm1_joints,
+                              reset_first=True, smooth=smooth_arm1)
+    return Job(run, MOVER, TRACKER, UNSCREWER, ARMS["arm2"], GRIPPERS["arm2"], pick, kfs[CAP_LOOK_POSE],
+               dict(kfs[TRASH_DROP_POSE]["pose"]), unscrew_params, halt_all_arms, arm1=ARMS.get("arm"))
+
+
+@st.dialog("Run the job", width="large")
+def confirm_job(with_arm1, unscrew_params):
+    try:
+        job = build_job(with_arm1, unscrew_params)
+    except ValueError as e:
+        st.error(str(e))
+        return
+    names = [n for n, _ in job.steps]
+    st.markdown("\n".join(f"{i}. {n}" + (" *(skipped: arm 2 only)*" if i == 1 and not with_arm1 else "")
+                          for i, n in enumerate(names, 1)))
+    st.caption(f"Speed: arm 2 at {FAST['set_speed']:g}°/s, {FAST['set_acceleration']:g}°/s² (80 % of max) for its moves; "
+               f"arm 1's pick & place at the normal {NORMAL['set_speed']:g}°/s. Arm 2 goes back to normal at the end.")
+    st.caption(f"Lock: within 3 mm of the bottle top (z {BT.BOTTLE_TOP_Z:.0f}); down {CAP_DOWN_MM:.0f} mm from the look "
+               f"height; drop at {TRASH_DROP_POSE}. Unscrew settings (Full controls → Unscrew cap):")
+    for line in describe(unscrew_params):
+        st.markdown(f"- {line}")
+    if unscrew_params.dry_run:
+        st.warning("Unscrew is in dry-run mode (empty grabs allowed): set it in Full controls → Unscrew cap.")
+    if not with_arm1:
+        st.caption("Arm 1 must already be holding the bottle at the place spot.")
+    st.caption("Every move goes through the motion planner. Stop or STOP ALL halts it; a stopped or failed step can "
+               "be retried. Keep the e-stop in reach.")
+    if st.button("Yes, run it", type="primary", key="job_yes"):
+        JOB_RUNNER.start(job, 0 if with_arm1 else 1)
+        st.rerun()
+
+
+@st.dialog("Run from a step", width="large")
+def confirm_job_from(k, unscrew_params):
+    try:
+        job = build_job(k == 0, unscrew_params)
+    except ValueError as e:
+        st.error(str(e))
+        return
+    names = [n for n, _ in job.steps]
+    st.markdown("\n".join(f"{i + 1}. {n}" for i, n in enumerate(names) if i >= k))
+    st.caption("Starts from where the arms are now. Make sure the earlier steps are really done (for step 7: arm 2 is "
+               "holding the cap up at the look height). Keep the e-stop in reach.")
+    if st.button("Yes, run", type="primary", key="job_from_yes"):
+        JOB_RUNNER.start(job, k)
+        st.rerun()
+
+
+def cam2_feed():
+    """Live cam2 image: the bottle-top circles found and, with the gripper pointing down, the spot under the fingers."""
+    try:
+        bgr, _ = CAM2_VISION.capture()
+        e = run(ARMS["arm2"].get_end_position())
+        out = bgr.copy()
+        caption = "cam2"
+        if e.o_z < -0.9:  # looking down: show what the tracker would see
+            r_exp = BT.expected_radius(CAM2_VISION, BT.BOTTLE_TOP_Z, BT.TOP_D_MM)
+            tcp, _ = BT.tcp_of(e)
+            under = BT.plane_to_pixel(CAM2_VISION, (tcp[0], tcp[1], BT.BOTTLE_TOP_Z))
+            circles, _ = BT.TopCircleDetect(r_exp)(bgr)
+            for i, (u, v, r, _) in enumerate(circles[:3]):
+                cv2.circle(out, (int(u), int(v)), int(r), (0, 255, 0) if i == 0 else (0, 165, 255), 3 if i == 0 else 2)
+            if under is not None:
+                cv2.drawMarker(out, (int(under[0]), int(under[1])), (255, 0, 255), cv2.MARKER_TILTED_CROSS, 30, 3)
+            caption = (f"cam2 looking down: green = bottle-top circle ({len(circles)} found), magenta = under the "
+                       "fingers")
+        st.image(cv2.cvtColor(out, cv2.COLOR_BGR2RGB), use_container_width=True, caption=caption)
+    except Exception as ex:
+        st.caption(f"cam2 not available: {ex}")
+
+
+def job_view():
+    st.subheader("Full job — one shot")
+    st.caption("Arm 1 picks the bottle with YOLO and holds it; arm 2 locks on the cap, unscrews it and drops it in "
+               "the trash. If a step stops or fails, retry it and the job carries on from there.")
+    running = JOB_RUNNER.running
+    busy = FULL_RUNNING or UNSCREWER.running or running
+    s = JOB_RUNNER.status()
+    c1, c2, c3 = st.columns(3)
+    if c1.button("▶ Full job (arm 1 + arm 2)", type="primary", use_container_width=True, disabled=busy, key="job_full"):
+        confirm_job(True, dataclasses.replace(params, start_pose="", start_joints=(), start_target=()))
+    if c2.button("▶ Open the cap only (arm 2)", use_container_width=True, disabled=busy, key="job_cap"):
+        confirm_job(False, dataclasses.replace(params, start_pose="", start_joints=(), start_target=()))
+    if c3.button("⏹ Stop", use_container_width=True, disabled=not running, key="job_stop"):
+        JOB_RUNNER.stop()
+        st.rerun()
+    with st.expander("Run from a chosen step (e.g. to finish a job after a dashboard restart)", expanded=False):
+        step_names = ["Arm 1: YOLO pick & place", "Arm 2: look at the bottle top", "Arm 2: lock on the cap",
+                      f"Arm 2: down {CAP_DOWN_MM:.0f} mm onto the cap", "Arm 2: unscrew", "Arm 2: back up holding the cap",
+                      "Arm 2: drop the cap in the trash"]
+        pick = st.selectbox("Start at", [f"{i}. {n}" for i, n in enumerate(step_names, 1)], index=6, key="job_from")
+        k = int(pick.split(".")[0]) - 1
+        if st.button(f"▶ Run from step {k + 1}", disabled=busy, key="job_from_go"):
+            confirm_job_from(k, dataclasses.replace(params, start_pose="", start_joints=(), start_target=()))
+    if not running and s["state"] in ("error", "stopped") and s.get("failed") is not None and JOB_RUNNER.job is not None:
+        k = s["failed"]
+        if st.button(f"↻ Retry step {k + 1}: {s['names'][k]} (then continue)", type="primary", disabled=busy,
+                     key="job_retry"):
+            JOB_RUNNER.start(JOB_RUNNER.job, k)
+            st.rerun()
+
+    @st.fragment(run_every=1.0)
+    def job_status():
+        s = JOB_RUNNER.status()
+        if s["names"]:
+            marks = []
+            for i, n in enumerate(s["names"]):
+                if s["state"] == "running" and i == s["step"]:
+                    mark = "▶"
+                elif s.get("failed") == i:
+                    mark = "✖"
+                elif (s["state"] == "done") or (s["step"] is not None and i < s["step"]) or \
+                        (s.get("failed") is not None and i < s["failed"]):
+                    mark = "✔"
+                else:
+                    mark = "·"
+                marks.append(f"{mark} {i + 1}. {n}")
+            st.code("\n".join(marks), language=None)
+        if s["state"] == "running":
+            st.info(s.get("detail") or (s["log"][-1] if s["log"] else "running"))
+        elif s["state"] == "done":
+            st.success("Done: the cap is in the trash.")
+        elif s["state"] in ("error", "stopped"):
+            st.error(f"{s['state'].capitalize()} at step {s['failed'] + 1}: {s['error']}")
+        if s["log"]:
+            with st.expander("Log", expanded=False):
+                st.code("\n".join(s["log"]), language=None)
+
+    job_status()
+    st.markdown("**cam2** (arm 2's camera)")
+
+    @st.fragment(run_every=1.5)
+    def cam2_live():
+        cam2_feed()
+
+    cam2_live()
+
+
 with TAB_SIMPLE:
     simple_view()
+    if TRACKER is not None and UNSCREWER is not None:
+        st.divider()
+        job_view()
