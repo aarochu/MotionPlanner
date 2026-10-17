@@ -381,8 +381,7 @@ function loadVoices() {
   voiceSelect.innerHTML = "";
   const stored = localStorage.getItem("tts_voice_name");
   let selected = false;
-  // Show only the first 5 installed voices to keep the dropdown short.
-  for (const v of voices.slice(0, 5)) {
+  for (const v of voices) {
     const o = document.createElement("option");
     o.value = v.name;
     o.textContent = v.name + (v.default ? " (default)" : "");
@@ -391,20 +390,17 @@ function loadVoices() {
     voiceSelect.appendChild(o);
   }
   if (voices.length === 0) {
+    // No voices loaded yet; add a single placeholder that speaks with the browser default.
     const o = document.createElement("option");
-    o.textContent = "(no voices installed)";
-    o.disabled = true;
+    o.value = "__default__";
+    o.textContent = "default voice";
+    o.selected = true;
     voiceSelect.appendChild(o);
   }
 }
 if (synth) {
   synth.onvoiceschanged = loadVoices;
   loadVoices();
-  let tries = 0;
-  const iv = setInterval(() => {
-    if (synth.getVoices().length > 0 || tries++ > 20) clearInterval(iv);
-    loadVoices();
-  }, 250);
 }
 voiceSelect.addEventListener("change", () => {
   localStorage.setItem("tts_voice_name", voiceSelect.value);
@@ -416,7 +412,7 @@ function speak(text) {
   const u = new SpeechSynthesisUtterance(text);
   u.lang = "en-US"; u.rate = 1.0; u.pitch = 1.0;
   const vname = localStorage.getItem("tts_voice_name") || "";
-  if (vname) {
+  if (vname && vname !== "__default__") {
     const v = voices.find(x => x.name === vname);
     if (v) u.voice = v;
   }
