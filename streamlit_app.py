@@ -16,8 +16,9 @@ import streamlit as st
 import poses_io
 import vision as V
 import yolo_grab as YG
-from bottle_task import (POSE_KEYS, WAVE_KEYFRAMES, BottleTask, Mover, half_turn, mirror_joints,
-                         simultaneous_startup, startup_waves, wave_offsets)
+from bottle_task import (DEFAULT_GRIPPER_SPEED, GRIP_CYCLES, POSE_KEYS, WAVE_ACCEL, WAVE_GRIPPER_SPEED, WAVE_SPEED,
+                         BottleTask, Mover, simultaneous_startup)
+from bottle_task import startup_plan as bottle_startup_plan
 from cap_unscrew import UnscrewParams, Unscrewer, describe
 from cap_vision import circle_features, detect_circles  # cap test judged against the table's brightness
 from kinematics import ov_to_matrix
@@ -187,11 +188,19 @@ def keyframe_text(p):
     return "  ".join(f"{v:7.1f}" for v in p["values"])
 
 
-def apply_gripper(arm, action):
-    if action == "grab":
-        return rpc(GRIPPERS[arm].grab)
-    elif action == "open":
-        rpc(GRIPPERS[arm].open)
+def apply_gripper(arm, action, fast=False):
+    """grab / open. fast: at the wave's gripper speed for this one action, then back to the default."""
+    fast = fast and action in ("grab", "open")
+    if fast:
+        rpc(GRIPPERS[arm].do_command, {"set_gripper_speed": WAVE_GRIPPER_SPEED})
+    try:
+        if action == "grab":
+            return rpc(GRIPPERS[arm].grab)
+        elif action == "open":
+            rpc(GRIPPERS[arm].open)
+    finally:
+        if fast:
+            rpc(GRIPPERS[arm].do_command, {"set_gripper_speed": DEFAULT_GRIPPER_SPEED})
 
 
 def safely(fn, *args):
@@ -421,7 +430,7 @@ def confirm_go(idx):
         def go():
             go_to_keyframe(p)
             check_action_stop()
-            apply_gripper(p["arm"], p.get("gripper"))
+            apply_gripper(p["arm"], p.get("gripper"), fast=bool(p.get("joint_move")))
         with st.spinner("Moving…"):
             ok = safely(go)
         if ok:
@@ -459,7 +468,7 @@ def confirm_run(selection, first=None, last=None):
             def step_fn(p=p):
                 go_to_keyframe(p)
                 check_action_stop()
-                apply_gripper(p["arm"], p.get("gripper"))
+                apply_gripper(p["arm"], p.get("gripper"), fast=bool(p.get("joint_move")))
             if not safely(step_fn):
                 return
             wait = p.get("delay", 0.0)
@@ -1084,7 +1093,7 @@ else:
     for i, p in enumerate(poses):
         row = st.columns(COLS)
         row[0].write(i + 1)
-        row[1].write(p["name"])
+        row[1].write(p["name"] + ("  ⚡ start-up only" if p.get("startup") else ""))
         row[2].write(p.get("arm", "arm"))
         row[3].code(keyframe_text(p), language=None)
         row[4].write(p.get("gripper") or "–")
@@ -1225,21 +1234,7 @@ def confirm_pick_place():
 
 
 def startup_plan():
-    """Simultaneous Start Up plan, or (None, reason). arm waves at parking; arm2 waves at the mirror image of arm's
-    parking (both facing the middle) with the turns in reverse order (left first), then goes to its start pose."""
-    poses = load_poses()
-    kf = {(p["arm"], p["name"]): p for p in poses}
-    park, first = kf.get(("arm", "parking")), kf.get(("arm2", ARM2_FIRST_POSE))
-    if park is None or "values" not in park or first is None:
-        return None, f"Needs a joint keyframe arm/parking and the keyframe arm2/{ARM2_FIRST_POSE}."
-    try:
-        offsets = wave_offsets(poses)
-    except ValueError as e:
-        return None, str(e)
-    mirror = mirror_joints(park["values"])
-    arm2_start = {"arm": "arm2", "name": "mirror of arm's parking", "values": mirror, "approach_values": half_turn(mirror)}
-    return {"starts": {"arm2": arm2_start, "arm": park}, "waves": startup_waves(offsets),
-            "finish": {"arm2": first}}, None
+    return bottle_startup_plan(load_poses(), ARM2_FIRST_POSE)
 
 
 @st.dialog("Simultaneous Start Up", width="large")
@@ -1250,13 +1245,16 @@ def confirm_startup():
         return
     fmt = lambda w: ", ".join(f"{name} {deg:+.1f}°" for name, deg in w)
     st.markdown(
-        "1. **arm2** to its wave start: the mirror image of arm's **parking**, facing the middle, camera right side up. "
-        "If it is elsewhere it is first planned to that spot with the wrist half a turn round (the planner refuses the "
-        "camera-upright version), then turns only its wrist into place (joint move). Skipped if already there.\n"
+        "1. **arm2** to its wave start, the keyframe **arm2_wave_start**: the mirror image of arm's **parking**, facing "
+        "the middle, camera right side up. If it is elsewhere it is first planned to that spot with the wrist half a "
+        "turn round (the planner refuses the camera-upright version), then turns only its wrist into place (joint "
+        "move). Skipped if already there.\n"
         "2. **arm** to **parking** (motion planner; skipped if already there).\n"
-        f"3. **Both together**, one turn at a time (joint moves, always these directions): **arm** {fmt(plan['waves']['arm'])}; "
-        f"**arm2** {fmt(plan['waves']['arm2'])} (reverse order, left first). Then both wrists back to their start.\n"
-        "4. **Both grippers** close, then open, together.\n"
+        f"3. **Both together**, one turn at a time, always these directions: **arm** {fmt(plan['waves']['arm'])}; "
+        f"**arm2** {fmt(plan['waves']['arm2'])} (left first). Then both wrists back to their start. The turns are "
+        f"joint moves on both arms at once (the motion planner can only move one arm at a time), at {WAVE_SPEED:.0f}°/s "
+        f"and {WAVE_ACCEL:.0f}°/s².\n"
+        f"4. **Both grippers** close and open, together, {GRIP_CYCLES} times, at gripper speed {WAVE_GRIPPER_SPEED:.0f}.\n"
         f"5. **arm2** to **{ARM2_FIRST_POSE}** (motion planner); **arm** stays at **parking**. Ready for the sequence.")
     st.caption("The arms move to their starts one at a time; only the wrists turn while both move. "
                "STOP ALL stops between steps. Keep the e-stop in reach.")

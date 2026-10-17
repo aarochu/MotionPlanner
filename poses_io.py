@@ -58,7 +58,9 @@ def sequence(poses, selection):
     """Keyframes to play for a Run sequence choice (see RUN_OPTIONS).
 
     "arm_then_arm2" plays every arm keyframe (in its own order) and then every arm2 keyframe, whatever the table
-    order; "both" plays the table order; "arm" / "arm2" play one arm only."""
+    order; "both" plays the table order; "arm" / "arm2" play one arm only. Keyframes flagged "startup" are never
+    included: they belong to Simultaneous Start Up and are shown in the table but skipped here (and by Full run)."""
+    poses = [p for p in poses if not p.get("startup")]   # start-up keyframes are played only by Simultaneous Start Up
     if selection == "arm_then_arm2":
         return [p for p in poses if p["arm"] == "arm"] + [p for p in poses if p["arm"] == "arm2"]
     if selection in ARMS:
