@@ -6,6 +6,10 @@ other unscrews the cap.
 
 It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam machine (`armfarm16`).
 
+New here (engineer or AI agent)? Read [`AGENTS.md`](AGENTS.md) for the full project context.
+Picking up the bottle-stabilizer (`arm`) work? Start with [`HANDOFF.md`](HANDOFF.md).
+Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer? See [`RUN_BOTH.md`](RUN_BOTH.md).
+
 ## Features
 
 - Live joint angles (Joint 0–5, matching the Viam app) and end-effector pose, refreshed every second
@@ -15,7 +19,10 @@ It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam mac
 - Save the current pose as a named keyframe, optionally with a gripper action after arriving
 - Reorder, delete, replay (Go) and run all keyframes in order across both arms
 - Export keyframes as a Python `POSES = {...}` dict for use in your own scripts
-- STOP ALL button for both arms
+- STOP ALL button for both arms (also stops the unscrew and the full run)
+- **Unscrew** (`arm2`): regrasp unscrew of the cap (grab, twist, open, twist back; the last twist lifts the cap)
+- **Full run**: `arm`'s sequence, then `arm2`'s keyframes, the unscrew, a retreat and the trash drop, in one go
+- Keyframes as joints or as XYZ + orientation
 - A camera section that follows the **active arm**, with a live feed and optional depth view. Each arm has its
   own detector:
   - **`arm2` (`cam2`): bottle cap** (his logic). Finds the silver cap and has an **Align** button that moves
@@ -26,7 +33,8 @@ It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam mac
 ## Bottle cap detection and alignment (`arm2`)
 
 `cam2` is a RealSense on `arm2`'s wrist, looking down. Each frame the app finds circles with a Hough
-transform and keeps only the bottle cap: a circle that is mostly silver (bright, unsaturated), has almost no
+transform and keeps only the bottle cap: a circle that is mostly silver (unsaturated and at least half as bright
+as the white table in the same frame, so shade or lighting changes don't matter), has almost no
 dark pixels (the dark bottle body and neck fail this) and has a crisp outline most of the way round (partial
 circles inside the cap fail this). **Align** uses the median cap over 5 frames, so one bad frame cannot steer
 the arm. Turn on *Show rejected circles* to see what was filtered out (thin red). Its distance comes
@@ -92,6 +100,56 @@ consistently, if the arm isn't at `NewMid`, or if the correction is over 30 mm (
 Moves are joint-space (`move_to_joint_positions`), so they are repeatable and the motion planner
 cannot pick a surprising path.
 
+## Full run (both arms)
+
+**Full run** plays, one after another. The arms move one at a time, except at the start: `arm2` moves to
+`safe_bottle_start_pose` (`ALONGSIDE_POSE`) together with `arm`'s move to `parking`; `arm` then waits at `parking`
+until `arm2` has arrived before continuing (and `arm2` skips that keyframe in its own part):
+
+1. **Keyframes:** every `arm` keyframe (Aaron's sequence: `parking` → `NewMid` → `grab_pos` → `grabframe1` → `end`,
+   which ends holding the bottle), then every `arm2` keyframe except `trash_drop_pose`
+   (`safe_bottle_start_pose` → `open_bottle_cap_up_pose` → `open_bottle_cap_pose`). Same order as Run sequence's
+   "arm, then arm2".
+2. **Unscrew** with the Unscrew panel's settings (below).
+3. **Retreat and drop:** straight up to `open_bottle_cap_up_pose`'s height while still holding the cap, keeping the
+   orientation the unscrew left (`RETREAT_POSE`); through `safe_bottle_start_pose` (move only, `VIA_POSES`); then
+   `trash_drop_pose` and its gripper action (`open`, so the cap drops; `TRASH_DROP_POSE`).
+
+Any failure, **Stop full run** or STOP ALL ends the run where it is and stops the arms; it never continues to the
+drop after a failed unscrew. A confirmation lists every step of all three phases first.
+
+Keyframes can be joints (`"values": [j0..j5]`, joint-space move) or a pose (`"pose": {"x", "y", "z", "o_x", "o_y",
+"o_z", "theta"}` in mm / orientation vector, in the arm's base frame as `get_end_position` reports; moved to with the
+motion planner). Choose with **Save as** when saving. The `arm2` keyframes are poses. Note the Viam app's arm card
+shows world coordinates; for `arm2` (base at world y = −914 mm) the world Y is 914 mm lower than the base-frame Y.
+
+Known issue: the planner has rejected the move to `trash_drop_pose` (its collision model reports `arm2`'s wrist
+against `cam2` and the forearm against `table` at that pose, which was taught by jogging joints). If it fails there,
+the run stops holding the cap at `safe_bottle_start_pose`; storing `trash_drop_pose` as joints is the simplest fix.
+
+## Unscrew (`arm2`)
+
+With the other arm holding the bottle, press **Unscrew**. The gripper opens to the release width and `arm2`
+moves to the **Start pose** keyframe (default `open_bottle_cap_pose`, `UNSCREW_START_POSE` in
+`streamlit_app.py`), which should put the open fingers around the cap. It then **levels the tool to point exactly straight down**,
+pivoting about the gripper (105 mm from the flange) so the fingers stay over the cap, and refuses if the pose
+is more than 15° off vertical. **Grip force** (G2 gripper, 1–100 %, default 60) applies to every grab and is
+reset to 50 % afterwards. Then each twist: **grab → unscrew** (rotate Joint 5 by the twist angle) **→ open →
+twist back**, all at the same height. The last twist keeps hold of the cap and **lifts it straight up** by the
+final lift, and the sequence ends there (it does not return to the start pose). The arm runs at
+the **Speed** setting (default 60°/s) and its speed is restored to 60°/s afterwards, even on error. Stop / STOP ALL halt it.
+
+It refuses to start unless the tool points straight down. With the tool down, +Joint 5 turns clockwise seen
+from above, so loosening is −Joint 5. **Do a dry run first** (on by default), without a cap: the full cycle
+runs, including open/close and the final lift, but an empty grab is not an error. Watch that the
+wrist turns counter-clockwise seen from above while closed; if not, switch the direction.
+
+Levelling builds the smallest tilt that points the tool down in the tool's own frame, lets the frame system
+convert it, and checks it before moving (axis down, gripper point fixed, roll unchanged).
+
+Don't command `arm2` from anywhere else (Viam app, another script, a config save) while a sequence runs: the
+xArm driver cancels the move in progress, which shows up as `context canceled`.
+
 ## Setup
 
 Requires Python 3.10+.
@@ -124,6 +182,12 @@ Then open http://127.0.0.1:8501.
 | `vision_config.json` | Saved detector settings (colors, shape gates, depth range). Loaded on start; edit it by hand or use **Save as default** |
 | `poses.json` | Saved keyframes, grouped by arm: the `arm` group (arm 1, picks up and holds the bottle) and the `arm2` group (unscrews the cap). Each group says which arm it drives, and `play_order` keeps the order across both |
 | `grab_reference.json` | Corrected-grab references for `arm` (created when you teach them) |
+| `poses_io.py` | Reading and writing `poses.json`, and which keyframes each Run sequence choice plays |
+| `import_poses.py` | Adds keyframes from another poses file (e.g. Rishi's `arm2` ones) after the existing ones |
+| `cap_vision.py` | Bottle-cap detection for `cam2` (used by the camera section) and its geometry helpers |
+| `cap_unscrew.py` | The `arm2` unscrew sequence, grip force/speed handling and tool levelling |
+| `bottle_task.py` | The full run (both arms' keyframes → unscrew → retreat → trash drop) and the shared keyframe move |
+| `cap_tracker.py` | Slow XY tracking of the cap with `arm2` (not wired into this GUI yet) |
 
 Detection is color first, then shape. Color finds blobs; each blob is scored on rectangularity, aspect
 ratio and solidity, and only blobs that pass the gates are considered. The best-scoring one is used.
@@ -147,3 +211,59 @@ Arm and gripper names are set in `ARM_GRIPPERS` at the top of `streamlit_app.py`
 - Run sequence moves one arm at a time, not both at once.
 - `collision_sensitivity` on the arm config is 0 by default; consider a small non-zero value for
   first tests with the cap.
+
+## Arm 1: YOLO head-on pick and place
+
+The dashboard opens on a **Simple** tab with two buttons for arm 1 (everything else is under **Full controls**).
+Both ask for confirmation, move only arm 1, and STOP ALL stops them between steps.
+
+- **Reset arm 1**: open the gripper; unless already at `parking`, back straight out 100 mm along the gripper,
+  rise to z 380 mm, then a joint move to `parking`. The retreat and rise keep the fingers off a bottle just placed.
+- **Run YOLO pick & place** (must start at `parking` or `NewMid`): `NewMid` → YOLO + aligned depth locate the
+  leftmost bottle over 3 frames (if it is cut off by the image edge or not seen, back up 100 mm in −x and look
+  again, at most twice) → level pre-grasp 100 mm in front → straight in → grab (on a miss: open, back out,
+  stop) → lift 100 mm → joint move to above the place spot → straight down to a set-down height worked out from
+  the measured bottle → keep holding it (arm 1 steadies the bottle for arm 2).
+
+Code: `yolo_grab.py` (measuring, planning, the two routines; no Streamlit), tests in `tests/test_yolo_grab.py`.
+The same moves are available step by step in **Full controls → Camera — cam on arm** (Locate, pre-grasp, go in
+and grab, back out, straight nudges, level, yaw).
+
+How it aims, and the numbers measured on 2026-10-16:
+
+- The bottle axis comes from depth on the leftmost box's centre strip; the bottle's width per height comes from its
+  silhouette (cobalt glass + depth). The grasp is at 35% of the bottle's height, with the gripper level.
+- **Lateral trim 18 mm (right)**: the frame system puts the camera 46 mm left of the gripper; by eye the camera's
+  centre estimate still read ~18 mm left of the real centre. **Depth trim +20 mm**: the finger pads go 20 mm past
+  the bottle axis. Both are settings in `yolo_grab.DEFAULTS` and the YOLO grab settings panel.
+- The bottle is a known size (~80 mm; the gripper opens 84 mm), so the plan uses `bottle_diam_mm` rather than
+  the measured width, which reads high (tape band, edge blur, a cut-off box). It still refuses a target that reads
+  over `max_width_mm` (115 mm): that is not one bottle.
+- Place spot: arm end at x −91.1, y −379.5, heading −31.9°, level; `PLACE_ABOVE_JOINTS` puts it 200 mm up.
+  `TABLE_Z = -8.7` mm (bottle set down by eye at arm-end z 104.0 with the pads 112.7 mm above its measured bottom).
+  Set-down height = `TABLE_Z` + (grasp height − bottle bottom), from each run's measurement.
+- Collision stop is off on `arm`; nothing models the bottles. The carry and reset paths were checked in simulation
+  against the box and a placed bottle, not against arm 2: keep arm 2 clear of the place spot.
+
+The earlier side-grab work (look steps, taught side approach/grasp/exit) was dropped; it is kept on the local
+branch `archive/side-grab`.
+
+### Machine configuration change, 2026-10-16
+
+Added module `bottle-yolo-module`, registry ID `viam-labs:YOLOv8`, pinned to `1.0.1`;
+added vision service `bottle-yolo`, model `viam-labs:vision:yolov8`, with
+`{"model_location": "yolov8n.pt", "camera_name": "cam"}`. The module downloads the pretrained weights on first start.
+See the [module documentation](https://github.com/viam-labs/YOLOv8).
+To revert, remove the service `bottle-yolo` and the module `bottle-yolo-module` from this machine's
+configuration. Leave the other modules, services, components and fragment mods untouched.
+A private pre-change snapshot was saved at `/tmp/motionplanner-before-yolo.json`; avoid restoring the
+whole snapshot over later teammates' changes.
+
+### Standalone YOLO preview
+
+The **YOLO bottle preview — Arm 1 camera** section works at any arm position, independently
+of sequence setup or grasp calibration. Live mode refreshes every two seconds; turn it off
+and use **Refresh YOLO preview** for individual snapshots. Bottles show numbered boxes and
+confidence scores, with the leftmost bottle green. **Show other detected objects** adds
+other classes in blue to help diagnose misclassification. Its confidence slider affects
+only the viewer. All viewer operations are read-only.

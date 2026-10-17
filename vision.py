@@ -71,8 +71,10 @@ def capture_frame(run, robot, cam, cam_frame, arm_name):
 
     dep = next((im for im in images if "dep" in im.mime_type), None)
     depth = None
+    depth_matches_color = False
     if dep is not None:
         depth = np.asarray(dep.bytes_to_depth_array(), dtype=np.uint16)  # mm; 0 / 65535 = no reading
+        depth_matches_color = depth.shape == bgr.shape[:2]
         if depth.shape != bgr.shape[:2]:
             depth = cv2.resize(depth, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_NEAREST)
 
@@ -82,7 +84,7 @@ def capture_frame(run, robot, cam, cam_frame, arm_name):
     origin = world_point(run, robot, cam_frame)
     axes = np.stack([(world_point(run, robot, cam_frame, *a) - origin) / 1000.0
                      for a in ((1000, 0, 0), (0, 1000, 0), (0, 0, 1000))], axis=1)
-    return {"bgr": bgr, "depth": depth, "arm": arm_name, "fx": k.focal_x_px, "fy": k.focal_y_px,
+    return {"bgr": bgr, "depth": depth, "depth_matches_color": depth_matches_color, "arm": arm_name, "fx": k.focal_x_px, "fy": k.focal_y_px,
             "cx": k.center_x_px, "cy": k.center_y_px, "origin": origin, "R": axes,
             "time": time.strftime("%H:%M:%S")}
 
