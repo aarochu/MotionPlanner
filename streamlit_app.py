@@ -313,805 +313,804 @@ CAMERA, INTRINSICS = CAM_RIGS.get(arm, (None, None))
 # Two tabs: "Simple" (two buttons for arm 1, filled at the end of this file) and "Full controls" (everything else).
 # Entering the Full tab here instead of a `with` block keeps the rest of the file at its original indentation.
 TAB_SIMPLE, TAB_FULL = st.tabs(["Simple", "Full controls"])
-TAB_FULL.__enter__()
-
-
-# ---------- live joints ----------
-@st.fragment(run_every=1.0)
-def live_joints(arm_name):
-    st.subheader(f"Live joints — {arm_name}")
-    try:
-        vals = joints(arm_name)
-        for col, name, v, desc in zip(st.columns(6), JOINTS, vals, JOINT_DESC):
-            col.metric(name, f"{v:.1f}°")
-            col.caption(desc)
-        p = run(ARMS[arm_name].get_end_position())
-        st.caption(
-            f"End effector — x {p.x:.1f}, y {p.y:.1f}, z {p.z:.1f} mm · "
-            f"orientation o=({p.o_x:.3f}, {p.o_y:.3f}, {p.o_z:.3f}), θ {p.theta:.1f}°"
-        )
-    except Exception as e:
-        st.warning(f"Could not read joints: {e}")
-
-
-live_joints(arm)
-
-# ---------- controls ----------
-jog_col, grip_col, save_col = st.columns([3, 2, 3])
-
-with jog_col:
-    with st.container(border=True):
-        st.subheader("Jog")
-        step = st.select_slider("Step (degrees)", [0.5, 1, 2, 5, 10], value=2)
-        for i, name in enumerate(JOINTS):
-            label, minus, plus = st.columns([2, 1, 1])
-            label.markdown(f"**{name}**  \n{JOINT_DESC[i]}")
-            for btn_col, sign, sym in ((minus, -1, "−"), (plus, 1, "+")):
-                if btn_col.button(sym, key=f"jog{i}{sym}", use_container_width=True):
-                    delta = sign * step
-                    if abs(delta) > MAX_JOG_DEG:
-                        st.error(f"Max jog is {MAX_JOG_DEG}°")
-                    else:
-                        def do_jog(i=i, delta=delta):
-                            v = joints(arm)
-                            v[i] += delta
-                            move(arm, v)
-                        safely(do_jog)
-
-with grip_col:
-    with st.container(border=True):
-        st.subheader("Gripper")
-        g_open, g_grab = st.columns(2)
-        if g_open.button("Open", use_container_width=True):
-            safely(apply_gripper, arm, "open")
-        if g_grab.button("Grab", use_container_width=True):
-            safely(apply_gripper, arm, "grab")
-
-with save_col:
-    with st.container(border=True):
-        st.subheader("Save keyframe")
-        name = st.text_input("Name", placeholder="e.g. holder_hold_pose")
-        g_action = st.selectbox(
-            "Gripper action after arriving", ["none", "grab", "open"], help="Played when this keyframe runs."
-        )
-        delay = st.number_input("Delay after (seconds)", min_value=0.0, max_value=600.0, step=0.5, value=0.0,
-                                help="Pause after this keyframe's move and gripper action, before the next one.")
-        save_as = st.radio("Save as", ["Joints", "XYZ + orientation"], horizontal=True,
-                           help="XYZ + orientation stores the end pose in the arm's base frame and moves there "
-                                "with the motion planner.")
-        if st.button(f"💾 Save current pose of {arm}", type="primary", use_container_width=True):
-            if not name.strip():
-                st.error("Give the keyframe a name.")
-            else:
-                def do_save():
-                    pose = {"name": name.strip(), "arm": arm}
-                    if save_as == "Joints":
-                        pose["values"] = joints(arm)
-                    else:
-                        e = run(ARMS[arm].get_end_position())
-                        pose["pose"] = {k: round(getattr(e, k), 4) for k in POSE_KEYS}
-                    pose.update({"gripper": "" if g_action == "none" else g_action, "delay": delay})
-                    save_poses([p for p in load_poses() if p["name"] != pose["name"]] + [pose])
-                if safely(do_save):
-                    st.session_state.pop(f"delay_{name.strip()}", None)  # table reads the saved delay
-                    st.toast(f"Saved '{name.strip()}'")
-                    st.rerun()
-
-
-# ---------- confirmation dialogs ----------
-@st.dialog("Confirm move")
-def confirm_go(idx):
-    p = load_poses()[idx]
-    st.write(f"Run **{p['name']}** on **{p['arm']}**?")
-    st.caption(keyframe_text(p))
-    st.caption("Keep the e-stop in reach.")
-    if st.button("Yes, move", type="primary"):
-        action_stop_event().clear()
-        def go():
-            go_to_keyframe(p)
-            check_action_stop()
-            apply_gripper(p["arm"], p.get("gripper"))
-        with st.spinner("Moving…"):
-            ok = safely(go)
-        if ok:
-            st.rerun()
-
-
-@st.dialog("Run sequence")
-def confirm_run(selection):
-    poses = poses_io.sequence(load_poses(), selection)
-    label = poses_io.RUN_OPTIONS[selection]
-    if not poses:
-        st.warning(f"No keyframes saved for {label}.")
-        return
-    counts = {a: sum(p["arm"] == a for p in poses) for a in poses_io.ARMS}
-    st.write(f"Play **{len(poses)}** step(s) for **{label}**, one move at a time?")
-    if selection == "arm_then_arm2":
-        st.caption(f"First all {counts['arm']} arm keyframe(s), then all {counts['arm2']} arm2 keyframe(s). "
-                   "The two arms never move at the same time.")
-    st.caption("Keep the e-stop in reach.")
-    if st.button("Yes, run", type="primary"):
-        action_stop_event().clear()
-        progress = st.progress(0.0)
-        for n, p in enumerate(poses, 1):
-            if n > 1 and p["arm"] != poses[n - 2]["arm"]:
-                st.write(f"— {poses[n - 2]['arm']} done, starting {p['arm']} —")
-            st.write(f"{n}/{len(poses)}: {p['arm']} → {p['name']}")
-            def step_fn(p=p):
+with TAB_FULL:
+    
+    
+    # ---------- live joints ----------
+    @st.fragment(run_every=1.0)
+    def live_joints(arm_name):
+        st.subheader(f"Live joints — {arm_name}")
+        try:
+            vals = joints(arm_name)
+            for col, name, v, desc in zip(st.columns(6), JOINTS, vals, JOINT_DESC):
+                col.metric(name, f"{v:.1f}°")
+                col.caption(desc)
+            p = run(ARMS[arm_name].get_end_position())
+            st.caption(
+                f"End effector — x {p.x:.1f}, y {p.y:.1f}, z {p.z:.1f} mm · "
+                f"orientation o=({p.o_x:.3f}, {p.o_y:.3f}, {p.o_z:.3f}), θ {p.theta:.1f}°"
+            )
+        except Exception as e:
+            st.warning(f"Could not read joints: {e}")
+    
+    
+    live_joints(arm)
+    
+    # ---------- controls ----------
+    jog_col, grip_col, save_col = st.columns([3, 2, 3])
+    
+    with jog_col:
+        with st.container(border=True):
+            st.subheader("Jog")
+            step = st.select_slider("Step (degrees)", [0.5, 1, 2, 5, 10], value=2)
+            for i, name in enumerate(JOINTS):
+                label, minus, plus = st.columns([2, 1, 1])
+                label.markdown(f"**{name}**  \n{JOINT_DESC[i]}")
+                for btn_col, sign, sym in ((minus, -1, "−"), (plus, 1, "+")):
+                    if btn_col.button(sym, key=f"jog{i}{sym}", use_container_width=True):
+                        delta = sign * step
+                        if abs(delta) > MAX_JOG_DEG:
+                            st.error(f"Max jog is {MAX_JOG_DEG}°")
+                        else:
+                            def do_jog(i=i, delta=delta):
+                                v = joints(arm)
+                                v[i] += delta
+                                move(arm, v)
+                            safely(do_jog)
+    
+    with grip_col:
+        with st.container(border=True):
+            st.subheader("Gripper")
+            g_open, g_grab = st.columns(2)
+            if g_open.button("Open", use_container_width=True):
+                safely(apply_gripper, arm, "open")
+            if g_grab.button("Grab", use_container_width=True):
+                safely(apply_gripper, arm, "grab")
+    
+    with save_col:
+        with st.container(border=True):
+            st.subheader("Save keyframe")
+            name = st.text_input("Name", placeholder="e.g. holder_hold_pose")
+            g_action = st.selectbox(
+                "Gripper action after arriving", ["none", "grab", "open"], help="Played when this keyframe runs."
+            )
+            delay = st.number_input("Delay after (seconds)", min_value=0.0, max_value=600.0, step=0.5, value=0.0,
+                                    help="Pause after this keyframe's move and gripper action, before the next one.")
+            save_as = st.radio("Save as", ["Joints", "XYZ + orientation"], horizontal=True,
+                               help="XYZ + orientation stores the end pose in the arm's base frame and moves there "
+                                    "with the motion planner.")
+            if st.button(f"💾 Save current pose of {arm}", type="primary", use_container_width=True):
+                if not name.strip():
+                    st.error("Give the keyframe a name.")
+                else:
+                    def do_save():
+                        pose = {"name": name.strip(), "arm": arm}
+                        if save_as == "Joints":
+                            pose["values"] = joints(arm)
+                        else:
+                            e = run(ARMS[arm].get_end_position())
+                            pose["pose"] = {k: round(getattr(e, k), 4) for k in POSE_KEYS}
+                        pose.update({"gripper": "" if g_action == "none" else g_action, "delay": delay})
+                        save_poses([p for p in load_poses() if p["name"] != pose["name"]] + [pose])
+                    if safely(do_save):
+                        st.session_state.pop(f"delay_{name.strip()}", None)  # table reads the saved delay
+                        st.toast(f"Saved '{name.strip()}'")
+                        st.rerun()
+    
+    
+    # ---------- confirmation dialogs ----------
+    @st.dialog("Confirm move")
+    def confirm_go(idx):
+        p = load_poses()[idx]
+        st.write(f"Run **{p['name']}** on **{p['arm']}**?")
+        st.caption(keyframe_text(p))
+        st.caption("Keep the e-stop in reach.")
+        if st.button("Yes, move", type="primary"):
+            action_stop_event().clear()
+            def go():
                 go_to_keyframe(p)
                 check_action_stop()
                 apply_gripper(p["arm"], p.get("gripper"))
-            if not safely(step_fn):
-                return
-            wait = p.get("delay", 0.0)
-            if wait > 0 and n < len(poses):
-                st.write(f"⏱ waiting {wait:g} s")
-                if action_stop_event().wait(wait):
-                    st.warning("Sequence stopped")
+            with st.spinner("Moving…"):
+                ok = safely(go)
+            if ok:
+                st.rerun()
+    
+    
+    @st.dialog("Run sequence")
+    def confirm_run(selection):
+        poses = poses_io.sequence(load_poses(), selection)
+        label = poses_io.RUN_OPTIONS[selection]
+        if not poses:
+            st.warning(f"No keyframes saved for {label}.")
+            return
+        counts = {a: sum(p["arm"] == a for p in poses) for a in poses_io.ARMS}
+        st.write(f"Play **{len(poses)}** step(s) for **{label}**, one move at a time?")
+        if selection == "arm_then_arm2":
+            st.caption(f"First all {counts['arm']} arm keyframe(s), then all {counts['arm2']} arm2 keyframe(s). "
+                       "The two arms never move at the same time.")
+        st.caption("Keep the e-stop in reach.")
+        if st.button("Yes, run", type="primary"):
+            action_stop_event().clear()
+            progress = st.progress(0.0)
+            for n, p in enumerate(poses, 1):
+                if n > 1 and p["arm"] != poses[n - 2]["arm"]:
+                    st.write(f"— {poses[n - 2]['arm']} done, starting {p['arm']} —")
+                st.write(f"{n}/{len(poses)}: {p['arm']} → {p['name']}")
+                def step_fn(p=p):
+                    go_to_keyframe(p)
+                    check_action_stop()
+                    apply_gripper(p["arm"], p.get("gripper"))
+                if not safely(step_fn):
                     return
-            progress.progress(n / len(poses))
-        st.success("Sequence complete")
-
-
-# ---------- typed joint targets ----------
-@st.dialog("Confirm move")
-def confirm_targets(arm_name, targets):
-    now = joints(arm_name)
-    st.write(f"Move **{arm_name}** to these joint angles?")
-    st.table({
-        "Joint": JOINTS,
-        "Now (°)": [f"{v:.2f}" for v in now],
-        "Target (°)": [f"{v:.2f}" for v in targets],
-        "Change (°)": [f"{t - n:+.2f}" for t, n in zip(targets, now)],
-    })
-    st.caption("Keep the e-stop in reach.")
-    if st.button("Yes, move", type="primary"):
-        with st.spinner("Moving…"):
-            ok = safely(move, arm_name, targets)
-        if ok:
-            st.rerun()
-
-
-def load_current_into_targets():
-    for i, v in enumerate(joints(arm)):
-        st.session_state[f"tgt{i}"] = round(v, 2)
-
-
-if st.session_state.get("tgt_arm") != arm:  # arm switched (or first load): start from its current pose
-    load_current_into_targets()
-    st.session_state["tgt_arm"] = arm
-
-with st.container(border=True):
-    st.subheader("Move to joint angles")
-    cols = st.columns(6)
-    targets = [
-        col.number_input(name, min_value=-360.0, max_value=360.0, step=1.0, format="%.2f", key=f"tgt{i}",
-                         help=JOINT_DESC[i])
-        for i, (col, name) in enumerate(zip(cols, JOINTS))
-    ]
-    b1, b2, _ = st.columns([1, 1, 4])
-    b1.button("Load current", on_click=load_current_into_targets, use_container_width=True)
-    if b2.button("Move", type="primary", use_container_width=True):
-        confirm_targets(arm, targets)
-
-# ---------- cam2 feed, circle detection and alignment ----------
-@st.dialog("Align to circle", width="large")
-def confirm_align(settings):
-    if st.session_state.get("align_yes") and "align_plan" in st.session_state:
-        # "Yes, move" reruns this dialog: execute the plan that was shown, not a fresh detection
-        with st.spinner("Moving…"):
-            ok = safely(lambda: run(ARMS[CAM_ARM].move_to_position(st.session_state.pop("align_plan")["target"])))
-        if ok:
-            st.rerun()
-        return
-    try:
-        found = detect_stable(settings["detect"])
-        if found is None:
-            st.error("No cap found consistently across 5 frames. Adjust the detection settings and try again.")
+                wait = p.get("delay", 0.0)
+                if wait > 0 and n < len(poses):
+                    st.write(f"⏱ waiting {wait:g} s")
+                    if action_stop_event().wait(wait):
+                        st.warning("Sequence stopped")
+                        return
+                progress.progress(n / len(poses))
+            st.success("Sequence complete")
+    
+    
+    # ---------- typed joint targets ----------
+    @st.dialog("Confirm move")
+    def confirm_targets(arm_name, targets):
+        now = joints(arm_name)
+        st.write(f"Move **{arm_name}** to these joint angles?")
+        st.table({
+            "Joint": JOINTS,
+            "Now (°)": [f"{v:.2f}" for v in now],
+            "Target (°)": [f"{v:.2f}" for v in targets],
+            "Change (°)": [f"{t - n:+.2f}" for t, n in zip(targets, now)],
+        })
+        st.caption("Keep the e-stop in reach.")
+        if st.button("Yes, move", type="primary"):
+            with st.spinner("Moving…"):
+                ok = safely(move, arm_name, targets)
+            if ok:
+                st.rerun()
+    
+    
+    def load_current_into_targets():
+        for i, v in enumerate(joints(arm)):
+            st.session_state[f"tgt{i}"] = round(v, 2)
+    
+    
+    if st.session_state.get("tgt_arm") != arm:  # arm switched (or first load): start from its current pose
+        load_current_into_targets()
+        st.session_state["tgt_arm"] = arm
+    
+    with st.container(border=True):
+        st.subheader("Move to joint angles")
+        cols = st.columns(6)
+        targets = [
+            col.number_input(name, min_value=-360.0, max_value=360.0, step=1.0, format="%.2f", key=f"tgt{i}",
+                             help=JOINT_DESC[i])
+            for i, (col, name) in enumerate(zip(cols, JOINTS))
+        ]
+        b1, b2, _ = st.columns([1, 1, 4])
+        b1.button("Load current", on_click=load_current_into_targets, use_container_width=True)
+        if b2.button("Move", type="primary", use_container_width=True):
+            confirm_targets(arm, targets)
+    
+    # ---------- cam2 feed, circle detection and alignment ----------
+    @st.dialog("Align to circle", width="large")
+    def confirm_align(settings):
+        if st.session_state.get("align_yes") and "align_plan" in st.session_state:
+            # "Yes, move" reruns this dialog: execute the plan that was shown, not a fresh detection
+            with st.spinner("Moving…"):
+                ok = safely(lambda: run(ARMS[CAM_ARM].move_to_position(st.session_state.pop("align_plan")["target"])))
+            if ok:
+                st.rerun()
             return
-        bgr, depth, circle, hits = found
-        point = measure(circle, depth, settings["cap_d"])
-        plan = plan_align(point, settings["hover"], settings["keep_height"])
-    except Exception as e:
-        st.error(str(e))
-        return
-    st.image(annotate(bgr, [circle]), use_container_width=True)
-    st.caption(f"Cap at ({circle[0]:.0f}, {circle[1]:.0f}) px, r {circle[2]:.0f} px · median of {hits}/5 frames")
-    dx, dy, dz = plan["delta"]
-    cw, g = plan["cap_world"], plan["grip_world"]
-    st.table({
-        "": ["Circle center (world)", f"{CAM_GRIPPER} now (world)", "Move", "Distance from"],
-        "x (mm)": [f"{cw.x:.1f}", f"{g.x:.1f}", f"{dx:+.1f}", ""],
-        "y (mm)": [f"{cw.y:.1f}", f"{g.y:.1f}", f"{dy:+.1f}", ""],
-        "z (mm)": [f"{cw.z:.1f}", f"{g.z:.1f}", f"{dz:+.1f}", "depth" if point["method"] == "depth" else "cap size"],
-    })
-    if point["method"] == "size":
-        st.warning(f"Depth only covers {point['valid']:.0%} of the circle (likely closer than the camera's "
-                   f"minimum range), so distance is estimated from a {settings['cap_d']:g} mm cap diameter.")
-    if plan["clamped"]:
-        st.info(f"Full correction is {plan['norm']:.0f} mm; this move is limited to {MAX_ALIGN_MM:.0f} mm. "
-                "Run Align again afterwards.")
-    if not settings["keep_height"] and plan["grip"].z + dz < plan["cap"].z + 20:
-        st.error("Target would put the gripper within 20 mm of the circle. Increase the hover height.")
-        return
-    st.caption("Keep the e-stop in reach. Orientation is kept; only the position changes.")
-    st.session_state["align_plan"] = plan
-    st.button("Yes, move", type="primary", key="align_yes")
-
-
-def at_keyframe(name, arm_name="arm"):
-    """(is the arm at this keyframe?, largest joint difference in degrees, the keyframe or None)."""
-    kf = next((p for p in load_poses() if p["name"] == name and p.get("arm", "arm") == arm_name), None)
-    if kf is None:
-        return False, None, None
-    if "values" not in kf:  # an XYZ keyframe: this check compares joint angles
-        return False, None, kf
-    diff = max(abs(a - b) for a, b in zip(joints(arm_name), kf["values"]))
-    return diff <= AT_POSE_TOL_DEG, diff, kf
-
-
-def pose_dict(p):
-    return {k: float(getattr(p, k)) for k in ("x", "y", "z", "o_x", "o_y", "o_z", "theta")}
-
-
-# ---------- arm: YOLO head-on grab of the leftmost bottle (yolo_grab.py) ----------
-def end_pose(arm_name="arm"):
-    return pose_dict(rpc(ARMS[arm_name].get_end_position))
-
-
-def pose_dist(a, b):
-    return float(np.linalg.norm([a[k] - b[k] for k in ("x", "y", "z")]))
-
-
-def same_orientation(a, b):
-    o = ("o_x", "o_y", "o_z")
-    return (np.allclose([a[k] for k in o], [b[k] for k in o], atol=0.01)
-            and abs((a["theta"] - b["theta"] + 180) % 360 - 180) < 1.0)
-
-
-def move_straight(goal, step_mm):
-    """Short straight steps from where arm is now to goal, same orientation. STOP ALL interrupts between steps."""
-    for w in YG.steps(end_pose(), goal, step_mm):
-        check_action_stop()
-        rpc(ARMS["arm"].move_to_position, Pose(**w))
-
-
-NUDGE_MAX_MM = 20.0
-
-
-def nudge_dirs(e):
-    """Unit directions for nudging, from the arm's current orientation. Left/right as seen looking along the gripper
-    (the camera's view); in/out along the gripper's approach axis; up/down vertical."""
-    a = YG._unit([e["o_x"], e["o_y"], e["o_z"]])
-    up = np.array([0.0, 0.0, 1.0])
-    left = np.cross(up, YG._unit(a - a.dot(up) * up))
-    return {"left": left, "right": -left, "up": up, "down": -up, "in": a, "out": -a}
-
-
-def nudge(direction, mm):
-    """One straight move of at most NUDGE_MAX_MM, orientation kept. Moves immediately, like the jog buttons."""
-    e = end_pose()
-    d = nudge_dirs(e)[direction] * min(float(mm), NUDGE_MAX_MM)
-    rpc(ARMS["arm"].move_to_position, Pose(**dict(e, x=e["x"] + d[0], y=e["y"] + d[1], z=e["z"] + d[2])))
-
-
-PIVOT_MM = 105.0 + YG.DEFAULTS["pad_mm"]   # finger pads: gripper frame (105 mm from the flange) + pad offset
-
-
-def turn_to(target):
-    rpc(ARMS["arm"].move_to_position, Pose(**target))
-
-
-@st.dialog("Level the gripper")
-def confirm_level():
-    e = end_pose()
-    try:
-        target, turn = YG.level_target(e, PIVOT_MM)
-    except ValueError as err:
-        st.error(str(err))
-        return
-    p0, r0, h0 = YG.attitude(e)
-    st.write(f"Make the approach axis horizontal and the fingers close horizontally, pivoting on the finger pads "
-             f"({PIVOT_MM:.0f} mm out from the flange) so the gripper stays where it is.")
-    st.table({"": ["now", "after"], "pitch (°)": [f"{p0:+.1f}", "0.0"], "roll (°)": [f"{r0:+.1f}", "0.0"],
-              "heading (°)": [f"{h0:+.1f}", f"{h0:+.1f}"]})
-    st.caption(f"{turn:.1f}° turn. Arm end moves {pose_dist(e, target):.1f} mm. Collision stop is off: keep the e-stop in reach.")
-    if st.session_state.get("lvl_yes"):
-        with st.spinner("Levelling…"):
-            ok = safely(turn_to, target)
-        if ok:
-            st.rerun()
-        return
-    st.button("Yes, level it", type="primary", key="lvl_yes")
-
-
-@st.dialog("YOLO head-on grab", width="large")
-def confirm_yolo_move(kind):
-    """kind: "pre" (open, go to the pre-grasp), "grab" (straight in, grab) or "back" (straight out to the pre-grasp line)."""
-    plan, m = st.session_state.get("yg_plan"), st.session_state.get("yg_meas")
-    cfg = st.session_state.get("yg_cfg_used", YG.DEFAULTS)
-    if plan is None:
-        st.error("Locate the bottle first.")
-        return
-    now, a = end_pose(), plan["a"]
-    if kind == "pre":
-        if pose_dist(now, m["end"]) > 2 or not same_orientation(now, m["end"]):
-            st.error("The arm moved since the bottle was located. Press Locate leftmost bottle again first.")
-            return
-        goal, step = plan["pre"], cfg["pre_step_mm"]
-        title = f"Open the gripper, then move to the pre-grasp {cfg['pre_mm']:.0f} mm straight in front of the bottle"
-    elif kind == "grab":
-        off = pose_dist(now, plan["pre"])
-        if off > 5 or not same_orientation(now, plan["pre"]):
-            st.error(f"Go to the pre-grasp first (the arm is {off:.0f} mm from it).")
-            return
-        goal, step = plan["grab"], cfg["in_step_mm"]
-        title = f"Open the gripper, go {cfg['pre_mm']:.0f} mm straight in along the gripper's axis, then grab"
-    else:
-        k = float(np.dot([now[q] - plan["pre"][q] for q in ("x", "y", "z")], a))
-        if k < 2:
-            st.info("Already at or behind the pre-grasp; nothing to back out of.")
-            return
-        goal, step = dict(now, x=now["x"] - k * a[0], y=now["y"] - k * a[1], z=now["z"] - k * a[2]), cfg["in_step_mm"]
-        title = f"Back straight out {k:.0f} mm along the approach (gripper unchanged)"
-    wps = YG.steps(now, goal, step)
-    st.write(f"**{title}.**")
-    st.table({"": ["arm end now", "target", "move"],
-              "x (mm)": [f"{now['x']:.1f}", f"{goal['x']:.1f}", f"{goal['x'] - now['x']:+.1f}"],
-              "y (mm)": [f"{now['y']:.1f}", f"{goal['y']:.1f}", f"{goal['y'] - now['y']:+.1f}"],
-              "z (mm)": [f"{now['z']:.1f}", f"{goal['z']:.1f}", f"{goal['z'] - now['z']:+.1f}"]})
-    st.caption(f"{len(wps)} straight step(s) of at most {step:.0f} mm; orientation kept. STOP ALL stops between "
-               "steps. Collision stop is off on this arm: keep the e-stop in reach.")
-    if st.session_state.get(f"yg_yes_{kind}"):
-        action_stop_event().clear()
-
-        def go():
-            if kind in ("pre", "grab"):
-                apply_gripper("arm", "open")
-            move_straight(goal, step)
-            if kind == "grab":
-                held = apply_gripper("arm", "grab")
-                st.session_state["yg_status"] = ("Grabbed: the gripper reports it is holding something." if held else
-                                                 "The gripper closed but reports it is NOT holding anything.")
-        with st.spinner("Moving…"):
-            ok = safely(go)
-        if ok:
-            st.rerun()
-        return
-    st.button("Yes, move", type="primary", key=f"yg_yes_{kind}")
-
-
-def yolo_result():
-    m, p = st.session_state.get("yg_meas"), st.session_state.get("yg_plan")
-    if m is None or p is None:
-        st.info("Press **Locate leftmost bottle**: YOLO + depth find the leftmost bottle in this view and plan a "
-                "head-on grab. Nothing moves until you confirm a move.")
-        return
-    st.image(YG.annotate(m, p), use_container_width=True,
-             caption=f"Located at {m['cap']['time']} · red cross: grasp point on the bottle axis · "
-                     "magenta: open fingertips")
-    A = p["A"]
-    c = st.columns(4)
-    c[0].metric("Bottle axis x, y (mm)", f"{A[0]:.0f}, {A[1]:.0f}")
-    c[1].metric("Grasp z (mm)", f"{p['zg']:.0f}")
-    c[2].metric("Width at grasp / height (mm)", f"{p.get('grip_width', m['width_mm']):.0f} / {p['height_mm']:.0f}")
-    c[3].metric("Camera to bottle (mm)", f"{m['z']:.0f}")
-    if m.get("profile"):
-        st.caption("Bottle width by height (fraction of height from the bottom → mm): " + " · ".join(
-            f"{f:.2f} → {w:.0f}" for f, w in sorted(m["profile"].items())) + f" · YOLO box {m['width_mm']:.0f} mm")
-    rel = m["cap"]["origin"] - m["gripper"]["origin"]
-    st.caption(f"Camera mount (frame system), relative to the gripper frame: {rel.dot(p['lat']):+.0f} mm sideways "
-               f"(left +), {rel[2]:+.0f} mm up, {rel.dot(p['a']):+.0f} mm along the approach; optical axis "
-               f"{np.degrees(np.arccos(np.clip(m['cap']['R'][:, 2].dot(p['a']), -1, 1))):.1f}° from the gripper axis.")
-    lat, vert, along = p["offset_now"]
-    st.caption(f"{m['frames']}/{m['of']} frames agree within {m['spread_mm']:.1f} mm · depth valid {m['valid']:.0%}, "
-               f"spread {m['depth_spread']:.0f} mm · YOLO {m['conf']:.0%} · bottles per frame {m['counts']}")
-    st.caption(f"Finger pads now vs. grasp point: {lat:+.0f} mm sideways (left +), {vert:+.0f} mm up, "
-               f"{along:.0f} mm ahead.")
-    for level, text in p["checks"]:
-        (st.error if level == "error" else st.warning if level == "warn" else st.success)(text)
-    if st.session_state.get("yg_status"):
-        st.info(st.session_state["yg_status"])
-
-
-if CAMERA is not None and CAM_ARM in ARMS:
-    st.divider()
-    st.subheader(f"Camera — {CAM} on {CAM_ARM}")
-    marker_mode = CAM_ARM == "arm"   # arm: YOLO head-on grab of the leftmost bottle   arm2: bottle cap (+ Align)
-    feed_col, ctrl_col = st.columns([3, 1])
-    with ctrl_col:
-        live = st.toggle("Live feed", value=True)
-        show_depth = st.toggle("Show depth", value=False)
-        if not marker_mode:
-            with st.expander("Detection", expanded=False):
-                min_r, max_r = st.slider("Radius (px)", 10, 400, (40, 250))
-                sensitivity = st.slider("Strictness", 20, 120, 50, help="Hough accumulator threshold; higher finds fewer circles.")
-                min_silver = st.slider("Min silver", 0.0, 1.0, 0.5, 0.05,
-                                       help="Share of the circle that is bright and unsaturated. Cap ≈ 0.8, bottle ≈ 0.15.")
-                min_rim = st.slider("Min outline", 0.0, 1.0, 0.55, 0.05,
-                                    help="Share of the circle's outline on an image edge. Cap ≈ 0.7–0.8; partial circles ≈ 0.4.")
-                show_rejected = st.toggle("Show rejected circles", value=False)
-                cap_d = st.number_input("Cap diameter (mm)", 5.0, 150.0, 30.0, 0.5,
-                                        help="Used to estimate distance when depth has no reading on the circle.")
-            keep_height = st.radio("Align", ["XY only (keep height)", "XY + hover above"], index=0) == "XY only (keep height)"
-            hover = st.number_input("Hover above circle (mm)", 20.0, 300.0, 80.0, 5.0, disabled=keep_height)
-            settings = {"detect": (min_r, max_r, sensitivity, min_silver, min_rim),"cap_d": cap_d, "hover": hover, "keep_height": keep_height}
-            if st.button(f"🎯 Align {CAM_ARM} to circle", type="primary", use_container_width=True,
-                         disabled=FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running)):
-                confirm_align(settings)
-        else:
-            d = YG.DEFAULTS
-            with st.expander("YOLO grab settings", expanded=False):
-                ycfg = dict(d,
-                            conf=st.slider("Min YOLO confidence", .1, .95, d["conf"], .05, key="yg_conf"),
-                            radius=st.number_input("Bottle radius (mm)", 10.0, 80.0, d["radius"], 1.0, key="yg_radius",
-                                                   help="Front surface to axis. Saratoga 28 oz is about 38-40 mm."),
-                            grasp_frac=st.slider("Grasp height (fraction of bottle height)", .1, .7, d["grasp_frac"],
-                                                 .05, key="yg_frac", help="Measured up from the bottle's bottom."),
-                            pad_mm=st.number_input("Finger pads beyond gripper frame (mm)", 20.0, 100.0, d["pad_mm"],
-                                                   1.0, key="yg_pad",
-                                                   help="The bottle axis ends up this far beyond the Viam gripper "
-                                                        "frame (105 mm from the flange). Larger stops earlier."),
-                            pre_mm=st.number_input("Pre-grasp distance (mm)", 60.0, 200.0, d["pre_mm"], 5.0, key="yg_pre"),
-                            stroke_mm=st.number_input("Gripper opening (mm)", 50.0, 90.0, d["stroke_mm"], 1.0,
-                                                      key="yg_stroke"),
-                            lat_trim_mm=st.number_input("Lateral trim, + = right (mm)", -50.0, 50.0, d["lat_trim_mm"],
-                                                        1.0, key="yg_lat",
-                                                        help="Correction for the camera's centre estimate, as seen "
-                                                             "looking along the gripper."),
-                            depth_trim_mm=st.number_input("Depth trim, + = deeper (mm)", -40.0, 40.0,
-                                                          d["depth_trim_mm"], 1.0, key="yg_depth",
-                                                          help="0 puts the finger pads on the bottle's axis."),
-                            level=st.toggle("Level the gripper on approach", value=d["level"], key="yg_level"))
-            settings = {"yolo": ycfg}
-            busy = FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running)
-            if st.button("🔍 Locate leftmost bottle", type="primary", use_container_width=True,
-                         help="Read-only: YOLO + aligned depth over a few frames, then plans a head-on grab. Nothing moves."):
-                try:
-                    with st.spinner(f"Measuring over {int(ycfg['frames'])} frames…"):
-                        m = YG.measure(run, ROBOT, ARMS["arm"], CAMERA, CAM, CAM_GRIPPER, ycfg)
-                    st.session_state.update(yg_meas=m, yg_plan=YG.plan(m, ycfg), yg_cfg_used=ycfg, yg_status="")
-                except Exception as e:
-                    st.session_state.pop("yg_plan", None)
-                    st.error(f"Locate failed: {e}")
-            plan = st.session_state.get("yg_plan")
-            ready = plan is not None and not any(level == "error" for level, _ in plan["checks"])
-            if st.button("1 · Move to pre-grasp", use_container_width=True, disabled=not ready or busy,
-                         help="Open the gripper, then go straight to a point in front of the bottle (confirm first)."):
-                confirm_yolo_move("pre")
-            if st.button("2 · Go in and grab", use_container_width=True, disabled=not ready or busy,
-                         help="From the pre-grasp: straight in along the gripper's axis, then grab (confirm first)."):
-                confirm_yolo_move("grab")
-            if st.button("↩ Back out", use_container_width=True, disabled=plan is None or busy,
-                         help="Straight back out along the approach to the pre-grasp line (confirm first)."):
-                confirm_yolo_move("back")
-            st.markdown("**Nudge** (straight, orientation kept; moves immediately)")
-            nmm = st.select_slider("Nudge step (mm)", options=[1, 2, 5, 10, 20], value=5, key="yg_nudge_mm")
-            labels = [("← Left", "left"), ("↑ Up", "up"), ("Right →", "right"),
-                      ("Out", "out"), ("↓ Down", "down"), ("In", "in")]
-            for col, (label, key) in zip(st.columns(3) + st.columns(3), labels):
-                if col.button(label, key=f"yg_n_{key}", use_container_width=True, disabled=busy,
-                              help=f"Move the gripper {key} by the step. Left/right as seen looking along the "
-                                   "gripper (the camera's view); in/out along the gripper's axis."):
-                    safely(nudge, key, nmm)
-            try:
-                pitch, roll, heading = YG.attitude(end_pose())
-                st.caption(f"Gripper attitude: pitch {pitch:+.1f}°, roll {roll:+.1f}°, heading {heading:+.1f}° "
-                           "(0° = straight along world +x).")
-            except Exception:
-                pass
-            if st.button("⚖ Level gripper", use_container_width=True, disabled=busy,
-                         help="Approach axis horizontal, fingers closing horizontally; pivots on the finger pads (confirm first)."):
-                confirm_level()
-            ycols = st.columns(2)
-            for col, (label, deg) in zip(ycols, [("⟲ Yaw left 1°", 1.0), ("Yaw right 1° ⟳", -1.0)]):
-                if col.button(label, key=f"yg_yaw_{deg}", use_container_width=True, disabled=busy,
-                              help="Turn about the vertical through the finger pads; moves immediately."):
-                    safely(lambda d=deg: turn_to(YG.yaw_target(end_pose(), d, PIVOT_MM)[0]))
-
-    @st.fragment(run_every=1.0 if live else None)
-    def cam_feed_cap(settings):
         try:
-            bgr, depth = capture()
-            circles, rejected = detect_circles(bgr, *settings["detect"])
+            found = detect_stable(settings["detect"])
+            if found is None:
+                st.error("No cap found consistently across 5 frames. Adjust the detection settings and try again.")
+                return
+            bgr, depth, circle, hits = found
+            point = measure(circle, depth, settings["cap_d"])
+            plan = plan_align(point, settings["hover"], settings["keep_height"])
         except Exception as e:
-            st.warning(f"Could not read {CAM}: {e}")
+            st.error(str(e))
             return
-        img_col, depth_col = st.columns(2) if show_depth and depth is not None else (st.container(), None)
-        img_col.image(annotate(bgr, circles, rejected if show_rejected else ()), use_container_width=True)
-        if depth_col is not None:
-            depth_col.image(colorize_depth(depth), use_container_width=True, caption="Depth (black = no reading)")
-        if circles:
-            u, v, r, _ = circles[0]
-            p = measure(circles[0], depth, settings["cap_d"])
-            st.caption(f"Circle at ({u:.0f}, {v:.0f}) px, r {r:.0f} px · camera frame x {p['x']:.1f}, "
-                       f"y {p['y']:.1f}, z {p['z']:.1f} mm ({'depth' if p['method'] == 'depth' else 'from cap size'}"
-                       f", depth valid {p['valid']:.0%}) · {len(rejected)} other circles rejected")
-        else:
-            st.caption(f"No cap found ({len(rejected)} circles rejected).")
-
-    @st.fragment(run_every=1.0 if live else None)
-    def cam_feed_plain(settings):
+        st.image(annotate(bgr, [circle]), use_container_width=True)
+        st.caption(f"Cap at ({circle[0]:.0f}, {circle[1]:.0f}) px, r {circle[2]:.0f} px · median of {hits}/5 frames")
+        dx, dy, dz = plan["delta"]
+        cw, g = plan["cap_world"], plan["grip_world"]
+        st.table({
+            "": ["Circle center (world)", f"{CAM_GRIPPER} now (world)", "Move", "Distance from"],
+            "x (mm)": [f"{cw.x:.1f}", f"{g.x:.1f}", f"{dx:+.1f}", ""],
+            "y (mm)": [f"{cw.y:.1f}", f"{g.y:.1f}", f"{dy:+.1f}", ""],
+            "z (mm)": [f"{cw.z:.1f}", f"{g.z:.1f}", f"{dz:+.1f}", "depth" if point["method"] == "depth" else "cap size"],
+        })
+        if point["method"] == "size":
+            st.warning(f"Depth only covers {point['valid']:.0%} of the circle (likely closer than the camera's "
+                       f"minimum range), so distance is estimated from a {settings['cap_d']:g} mm cap diameter.")
+        if plan["clamped"]:
+            st.info(f"Full correction is {plan['norm']:.0f} mm; this move is limited to {MAX_ALIGN_MM:.0f} mm. "
+                    "Run Align again afterwards.")
+        if not settings["keep_height"] and plan["grip"].z + dz < plan["cap"].z + 20:
+            st.error("Target would put the gripper within 20 mm of the circle. Increase the hover height.")
+            return
+        st.caption("Keep the e-stop in reach. Orientation is kept; only the position changes.")
+        st.session_state["align_plan"] = plan
+        st.button("Yes, move", type="primary", key="align_yes")
+    
+    
+    def at_keyframe(name, arm_name="arm"):
+        """(is the arm at this keyframe?, largest joint difference in degrees, the keyframe or None)."""
+        kf = next((p for p in load_poses() if p["name"] == name and p.get("arm", "arm") == arm_name), None)
+        if kf is None:
+            return False, None, None
+        if "values" not in kf:  # an XYZ keyframe: this check compares joint angles
+            return False, None, kf
+        diff = max(abs(a - b) for a, b in zip(joints(arm_name), kf["values"]))
+        return diff <= AT_POSE_TOL_DEG, diff, kf
+    
+    
+    def pose_dict(p):
+        return {k: float(getattr(p, k)) for k in ("x", "y", "z", "o_x", "o_y", "o_z", "theta")}
+    
+    
+    # ---------- arm: YOLO head-on grab of the leftmost bottle (yolo_grab.py) ----------
+    def end_pose(arm_name="arm"):
+        return pose_dict(rpc(ARMS[arm_name].get_end_position))
+    
+    
+    def pose_dist(a, b):
+        return float(np.linalg.norm([a[k] - b[k] for k in ("x", "y", "z")]))
+    
+    
+    def same_orientation(a, b):
+        o = ("o_x", "o_y", "o_z")
+        return (np.allclose([a[k] for k in o], [b[k] for k in o], atol=0.01)
+                and abs((a["theta"] - b["theta"] + 180) % 360 - 180) < 1.0)
+    
+    
+    def move_straight(goal, step_mm):
+        """Short straight steps from where arm is now to goal, same orientation. STOP ALL interrupts between steps."""
+        for w in YG.steps(end_pose(), goal, step_mm):
+            check_action_stop()
+            rpc(ARMS["arm"].move_to_position, Pose(**w))
+    
+    
+    NUDGE_MAX_MM = 20.0
+    
+    
+    def nudge_dirs(e):
+        """Unit directions for nudging, from the arm's current orientation. Left/right as seen looking along the gripper
+        (the camera's view); in/out along the gripper's approach axis; up/down vertical."""
+        a = YG._unit([e["o_x"], e["o_y"], e["o_z"]])
+        up = np.array([0.0, 0.0, 1.0])
+        left = np.cross(up, YG._unit(a - a.dot(up) * up))
+        return {"left": left, "right": -left, "up": up, "down": -up, "in": a, "out": -a}
+    
+    
+    def nudge(direction, mm):
+        """One straight move of at most NUDGE_MAX_MM, orientation kept. Moves immediately, like the jog buttons."""
+        e = end_pose()
+        d = nudge_dirs(e)[direction] * min(float(mm), NUDGE_MAX_MM)
+        rpc(ARMS["arm"].move_to_position, Pose(**dict(e, x=e["x"] + d[0], y=e["y"] + d[1], z=e["z"] + d[2])))
+    
+    
+    PIVOT_MM = 105.0 + YG.DEFAULTS["pad_mm"]   # finger pads: gripper frame (105 mm from the flange) + pad offset
+    
+    
+    def turn_to(target):
+        rpc(ARMS["arm"].move_to_position, Pose(**target))
+    
+    
+    @st.dialog("Level the gripper")
+    def confirm_level():
+        e = end_pose()
         try:
-            bgr, depth = capture()
-        except Exception as e:
-            st.warning(f"Could not read {CAM}: {e}")
+            target, turn = YG.level_target(e, PIVOT_MM)
+        except ValueError as err:
+            st.error(str(err))
             return
+        p0, r0, h0 = YG.attitude(e)
+        st.write(f"Make the approach axis horizontal and the fingers close horizontally, pivoting on the finger pads "
+                 f"({PIVOT_MM:.0f} mm out from the flange) so the gripper stays where it is.")
+        st.table({"": ["now", "after"], "pitch (°)": [f"{p0:+.1f}", "0.0"], "roll (°)": [f"{r0:+.1f}", "0.0"],
+                  "heading (°)": [f"{h0:+.1f}", f"{h0:+.1f}"]})
+        st.caption(f"{turn:.1f}° turn. Arm end moves {pose_dist(e, target):.1f} mm. Collision stop is off: keep the e-stop in reach.")
+        if st.session_state.get("lvl_yes"):
+            with st.spinner("Levelling…"):
+                ok = safely(turn_to, target)
+            if ok:
+                st.rerun()
+            return
+        st.button("Yes, level it", type="primary", key="lvl_yes")
+    
+    
+    @st.dialog("YOLO head-on grab", width="large")
+    def confirm_yolo_move(kind):
+        """kind: "pre" (open, go to the pre-grasp), "grab" (straight in, grab) or "back" (straight out to the pre-grasp line)."""
         plan, m = st.session_state.get("yg_plan"), st.session_state.get("yg_meas")
-        note = ""
-        if plan is not None and m is not None:
-            try:   # orientation is kept by every YOLO move, so the camera has only translated since Locate
-                now = end_pose()
-                if same_orientation(now, m["end"]):
-                    cap = dict(m["cap"], origin=m["cap"]["origin"] + np.array([now[k] - m["end"][k] for k in ("x", "y", "z")]))
-                    for pt, col in ((plan["A"], (0, 0, 255)), (plan["A"] - plan["lat"] * 42, (255, 0, 255)),
-                                    (plan["A"] + plan["lat"] * 42, (255, 0, 255))):
-                        u, v = YG.project(cap, pt)
-                        cv2.drawMarker(bgr, (int(u), int(v)), col, cv2.MARKER_CROSS, 40, 3)
-                    note = "Red cross: the planned grasp point projected from where the arm is now (it should sit on the bottle)."
-            except Exception:
-                pass
-        img_col, depth_col = st.columns(2) if show_depth and depth is not None else (st.container(), None)
-        img_col.image(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), use_container_width=True, caption=note or None)
-        if depth_col is not None:
-            depth_col.image(colorize_depth(depth), use_container_width=True, caption="Depth (black = no reading)")
-
-    with feed_col:
-        if marker_mode:
-            cam_feed_plain(settings)
-            yolo_result()
+        cfg = st.session_state.get("yg_cfg_used", YG.DEFAULTS)
+        if plan is None:
+            st.error("Locate the bottle first.")
+            return
+        now, a = end_pose(), plan["a"]
+        if kind == "pre":
+            if pose_dist(now, m["end"]) > 2 or not same_orientation(now, m["end"]):
+                st.error("The arm moved since the bottle was located. Press Locate leftmost bottle again first.")
+                return
+            goal, step = plan["pre"], cfg["pre_step_mm"]
+            title = f"Open the gripper, then move to the pre-grasp {cfg['pre_mm']:.0f} mm straight in front of the bottle"
+        elif kind == "grab":
+            off = pose_dist(now, plan["pre"])
+            if off > 5 or not same_orientation(now, plan["pre"]):
+                st.error(f"Go to the pre-grasp first (the arm is {off:.0f} mm from it).")
+                return
+            goal, step = plan["grab"], cfg["in_step_mm"]
+            title = f"Open the gripper, go {cfg['pre_mm']:.0f} mm straight in along the gripper's axis, then grab"
         else:
-            cam_feed_cap(settings)
-
-
-# ---------- standalone YOLO viewer (read-only, independent of sequence/calibration) ----------
-st.divider()
-st.subheader("YOLO bottle preview — Arm 1 camera")
-st.caption("Watch bottle detection from cam at any arm position. Green marks the leftmost visible bottle; "
-           "yellow marks other bottles. This viewer never moves the arm or runs a sequence.")
-yolo_live = st.toggle("Live YOLO preview", value=True, key="yolo_live")
-yolo_confidence = st.slider("Preview confidence threshold", .1, 1., .65, .05, key="yolo_confidence",
-                            help="Only changes this preview. Sequence detection stays at 0.65.")
-yolo_show_all = st.toggle("Show other detected objects", value=False, key="yolo_show_all",
-                          help="Also show other classes in blue to see whether YOLO labels a bottle as something else.")
-
-
-@st.fragment(run_every=2.0 if yolo_live else None)
-def yolo_preview_panel(confidence, show_all):
-    st.button("Refresh YOLO preview", key="yolo_refresh", help="Capture another frame without moving the arm.")
-    if "arm" not in CAM_RIGS:
-        st.warning("Arm 1 camera is unavailable.")
-        return
-    try:
-        image, count = YG.preview(run, ROBOT, CAM_RIGS["arm"][0], confidence=confidence, show_all=show_all)
-    except Exception as exc:
-        st.warning(f"YOLO preview unavailable: {exc}")
-        return
-    st.image(image, width="stretch")
-    st.caption(f"{count} bottle(s) at confidence ≥ {confidence:.0%} · "
-               f"captured {time.strftime('%H:%M:%S')} · {'Live: refreshes every 2 seconds' if yolo_live else 'Paused: click Refresh for a new frame'}")
-    if count == 0:
-        st.info("No bottles detected at this threshold. Try lowering it or showing other detected objects.")
-
-
-yolo_preview_panel(yolo_confidence, yolo_show_all)
-
-
-# ---------- unscrew (cap_unscrew.py) ----------
-@st.dialog("Unscrew cap", width="large")
-def confirm_unscrew(params):
-    problem = None if (params.start_joints or params.start_target) else UNSCREWER.check()  # start pose: checked on arrival
-    if problem:
-        st.error(problem)
-        return
-    st.write(f"Run this on **arm2** / **gripper2**?")
-    for line in describe(params):
-        st.markdown(f"- {line}")
-    st.caption("The other arm must already be holding the bottle. Keep the e-stop in reach.")
-    if st.button("Yes, unscrew", type="primary"):
-        UNSCREWER.start(params)
-        st.rerun()
-
-
-if UNSCREWER is not None:
+            k = float(np.dot([now[q] - plan["pre"][q] for q in ("x", "y", "z")], a))
+            if k < 2:
+                st.info("Already at or behind the pre-grasp; nothing to back out of.")
+                return
+            goal, step = dict(now, x=now["x"] - k * a[0], y=now["y"] - k * a[1], z=now["z"] - k * a[2]), cfg["in_step_mm"]
+            title = f"Back straight out {k:.0f} mm along the approach (gripper unchanged)"
+        wps = YG.steps(now, goal, step)
+        st.write(f"**{title}.**")
+        st.table({"": ["arm end now", "target", "move"],
+                  "x (mm)": [f"{now['x']:.1f}", f"{goal['x']:.1f}", f"{goal['x'] - now['x']:+.1f}"],
+                  "y (mm)": [f"{now['y']:.1f}", f"{goal['y']:.1f}", f"{goal['y'] - now['y']:+.1f}"],
+                  "z (mm)": [f"{now['z']:.1f}", f"{goal['z']:.1f}", f"{goal['z'] - now['z']:+.1f}"]})
+        st.caption(f"{len(wps)} straight step(s) of at most {step:.0f} mm; orientation kept. STOP ALL stops between "
+                   "steps. Collision stop is off on this arm: keep the e-stop in reach.")
+        if st.session_state.get(f"yg_yes_{kind}"):
+            action_stop_event().clear()
+    
+            def go():
+                if kind in ("pre", "grab"):
+                    apply_gripper("arm", "open")
+                move_straight(goal, step)
+                if kind == "grab":
+                    held = apply_gripper("arm", "grab")
+                    st.session_state["yg_status"] = ("Grabbed: the gripper reports it is holding something." if held else
+                                                     "The gripper closed but reports it is NOT holding anything.")
+            with st.spinner("Moving…"):
+                ok = safely(go)
+            if ok:
+                st.rerun()
+            return
+        st.button("Yes, move", type="primary", key=f"yg_yes_{kind}")
+    
+    
+    def yolo_result():
+        m, p = st.session_state.get("yg_meas"), st.session_state.get("yg_plan")
+        if m is None or p is None:
+            st.info("Press **Locate leftmost bottle**: YOLO + depth find the leftmost bottle in this view and plan a "
+                    "head-on grab. Nothing moves until you confirm a move.")
+            return
+        st.image(YG.annotate(m, p), use_container_width=True,
+                 caption=f"Located at {m['cap']['time']} · red cross: grasp point on the bottle axis · "
+                         "magenta: open fingertips")
+        A = p["A"]
+        c = st.columns(4)
+        c[0].metric("Bottle axis x, y (mm)", f"{A[0]:.0f}, {A[1]:.0f}")
+        c[1].metric("Grasp z (mm)", f"{p['zg']:.0f}")
+        c[2].metric("Width at grasp / height (mm)", f"{p.get('grip_width', m['width_mm']):.0f} / {p['height_mm']:.0f}")
+        c[3].metric("Camera to bottle (mm)", f"{m['z']:.0f}")
+        if m.get("profile"):
+            st.caption("Bottle width by height (fraction of height from the bottom → mm): " + " · ".join(
+                f"{f:.2f} → {w:.0f}" for f, w in sorted(m["profile"].items())) + f" · YOLO box {m['width_mm']:.0f} mm")
+        rel = m["cap"]["origin"] - m["gripper"]["origin"]
+        st.caption(f"Camera mount (frame system), relative to the gripper frame: {rel.dot(p['lat']):+.0f} mm sideways "
+                   f"(left +), {rel[2]:+.0f} mm up, {rel.dot(p['a']):+.0f} mm along the approach; optical axis "
+                   f"{np.degrees(np.arccos(np.clip(m['cap']['R'][:, 2].dot(p['a']), -1, 1))):.1f}° from the gripper axis.")
+        lat, vert, along = p["offset_now"]
+        st.caption(f"{m['frames']}/{m['of']} frames agree within {m['spread_mm']:.1f} mm · depth valid {m['valid']:.0%}, "
+                   f"spread {m['depth_spread']:.0f} mm · YOLO {m['conf']:.0%} · bottles per frame {m['counts']}")
+        st.caption(f"Finger pads now vs. grasp point: {lat:+.0f} mm sideways (left +), {vert:+.0f} mm up, "
+                   f"{along:.0f} mm ahead.")
+        for level, text in p["checks"]:
+            (st.error if level == "error" else st.warning if level == "warn" else st.success)(text)
+        if st.session_state.get("yg_status"):
+            st.info(st.session_state["yg_status"])
+    
+    
+    if CAMERA is not None and CAM_ARM in ARMS:
+        st.divider()
+        st.subheader(f"Camera — {CAM} on {CAM_ARM}")
+        marker_mode = CAM_ARM == "arm"   # arm: YOLO head-on grab of the leftmost bottle   arm2: bottle cap (+ Align)
+        feed_col, ctrl_col = st.columns([3, 1])
+        with ctrl_col:
+            live = st.toggle("Live feed", value=True)
+            show_depth = st.toggle("Show depth", value=False)
+            if not marker_mode:
+                with st.expander("Detection", expanded=False):
+                    min_r, max_r = st.slider("Radius (px)", 10, 400, (40, 250))
+                    sensitivity = st.slider("Strictness", 20, 120, 50, help="Hough accumulator threshold; higher finds fewer circles.")
+                    min_silver = st.slider("Min silver", 0.0, 1.0, 0.5, 0.05,
+                                           help="Share of the circle that is bright and unsaturated. Cap ≈ 0.8, bottle ≈ 0.15.")
+                    min_rim = st.slider("Min outline", 0.0, 1.0, 0.55, 0.05,
+                                        help="Share of the circle's outline on an image edge. Cap ≈ 0.7–0.8; partial circles ≈ 0.4.")
+                    show_rejected = st.toggle("Show rejected circles", value=False)
+                    cap_d = st.number_input("Cap diameter (mm)", 5.0, 150.0, 30.0, 0.5,
+                                            help="Used to estimate distance when depth has no reading on the circle.")
+                keep_height = st.radio("Align", ["XY only (keep height)", "XY + hover above"], index=0) == "XY only (keep height)"
+                hover = st.number_input("Hover above circle (mm)", 20.0, 300.0, 80.0, 5.0, disabled=keep_height)
+                settings = {"detect": (min_r, max_r, sensitivity, min_silver, min_rim),"cap_d": cap_d, "hover": hover, "keep_height": keep_height}
+                if st.button(f"🎯 Align {CAM_ARM} to circle", type="primary", use_container_width=True,
+                             disabled=FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running)):
+                    confirm_align(settings)
+            else:
+                d = YG.DEFAULTS
+                with st.expander("YOLO grab settings", expanded=False):
+                    ycfg = dict(d,
+                                conf=st.slider("Min YOLO confidence", .1, .95, d["conf"], .05, key="yg_conf"),
+                                radius=st.number_input("Bottle radius (mm)", 10.0, 80.0, d["radius"], 1.0, key="yg_radius",
+                                                       help="Front surface to axis. Saratoga 28 oz is about 38-40 mm."),
+                                grasp_frac=st.slider("Grasp height (fraction of bottle height)", .1, .7, d["grasp_frac"],
+                                                     .05, key="yg_frac", help="Measured up from the bottle's bottom."),
+                                pad_mm=st.number_input("Finger pads beyond gripper frame (mm)", 20.0, 100.0, d["pad_mm"],
+                                                       1.0, key="yg_pad",
+                                                       help="The bottle axis ends up this far beyond the Viam gripper "
+                                                            "frame (105 mm from the flange). Larger stops earlier."),
+                                pre_mm=st.number_input("Pre-grasp distance (mm)", 60.0, 200.0, d["pre_mm"], 5.0, key="yg_pre"),
+                                stroke_mm=st.number_input("Gripper opening (mm)", 50.0, 90.0, d["stroke_mm"], 1.0,
+                                                          key="yg_stroke"),
+                                lat_trim_mm=st.number_input("Lateral trim, + = right (mm)", -50.0, 50.0, d["lat_trim_mm"],
+                                                            1.0, key="yg_lat",
+                                                            help="Correction for the camera's centre estimate, as seen "
+                                                                 "looking along the gripper."),
+                                depth_trim_mm=st.number_input("Depth trim, + = deeper (mm)", -40.0, 40.0,
+                                                              d["depth_trim_mm"], 1.0, key="yg_depth",
+                                                              help="0 puts the finger pads on the bottle's axis."),
+                                level=st.toggle("Level the gripper on approach", value=d["level"], key="yg_level"))
+                settings = {"yolo": ycfg}
+                busy = FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running)
+                if st.button("🔍 Locate leftmost bottle", type="primary", use_container_width=True,
+                             help="Read-only: YOLO + aligned depth over a few frames, then plans a head-on grab. Nothing moves."):
+                    try:
+                        with st.spinner(f"Measuring over {int(ycfg['frames'])} frames…"):
+                            m = YG.measure(run, ROBOT, ARMS["arm"], CAMERA, CAM, CAM_GRIPPER, ycfg)
+                        st.session_state.update(yg_meas=m, yg_plan=YG.plan(m, ycfg), yg_cfg_used=ycfg, yg_status="")
+                    except Exception as e:
+                        st.session_state.pop("yg_plan", None)
+                        st.error(f"Locate failed: {e}")
+                plan = st.session_state.get("yg_plan")
+                ready = plan is not None and not any(level == "error" for level, _ in plan["checks"])
+                if st.button("1 · Move to pre-grasp", use_container_width=True, disabled=not ready or busy,
+                             help="Open the gripper, then go straight to a point in front of the bottle (confirm first)."):
+                    confirm_yolo_move("pre")
+                if st.button("2 · Go in and grab", use_container_width=True, disabled=not ready or busy,
+                             help="From the pre-grasp: straight in along the gripper's axis, then grab (confirm first)."):
+                    confirm_yolo_move("grab")
+                if st.button("↩ Back out", use_container_width=True, disabled=plan is None or busy,
+                             help="Straight back out along the approach to the pre-grasp line (confirm first)."):
+                    confirm_yolo_move("back")
+                st.markdown("**Nudge** (straight, orientation kept; moves immediately)")
+                nmm = st.select_slider("Nudge step (mm)", options=[1, 2, 5, 10, 20], value=5, key="yg_nudge_mm")
+                labels = [("← Left", "left"), ("↑ Up", "up"), ("Right →", "right"),
+                          ("Out", "out"), ("↓ Down", "down"), ("In", "in")]
+                for col, (label, key) in zip(st.columns(3) + st.columns(3), labels):
+                    if col.button(label, key=f"yg_n_{key}", use_container_width=True, disabled=busy,
+                                  help=f"Move the gripper {key} by the step. Left/right as seen looking along the "
+                                       "gripper (the camera's view); in/out along the gripper's axis."):
+                        safely(nudge, key, nmm)
+                try:
+                    pitch, roll, heading = YG.attitude(end_pose())
+                    st.caption(f"Gripper attitude: pitch {pitch:+.1f}°, roll {roll:+.1f}°, heading {heading:+.1f}° "
+                               "(0° = straight along world +x).")
+                except Exception:
+                    pass
+                if st.button("⚖ Level gripper", use_container_width=True, disabled=busy,
+                             help="Approach axis horizontal, fingers closing horizontally; pivots on the finger pads (confirm first)."):
+                    confirm_level()
+                ycols = st.columns(2)
+                for col, (label, deg) in zip(ycols, [("⟲ Yaw left 1°", 1.0), ("Yaw right 1° ⟳", -1.0)]):
+                    if col.button(label, key=f"yg_yaw_{deg}", use_container_width=True, disabled=busy,
+                                  help="Turn about the vertical through the finger pads; moves immediately."):
+                        safely(lambda d=deg: turn_to(YG.yaw_target(end_pose(), d, PIVOT_MM)[0]))
+    
+        @st.fragment(run_every=1.0 if live else None)
+        def cam_feed_cap(settings):
+            try:
+                bgr, depth = capture()
+                circles, rejected = detect_circles(bgr, *settings["detect"])
+            except Exception as e:
+                st.warning(f"Could not read {CAM}: {e}")
+                return
+            img_col, depth_col = st.columns(2) if show_depth and depth is not None else (st.container(), None)
+            img_col.image(annotate(bgr, circles, rejected if show_rejected else ()), use_container_width=True)
+            if depth_col is not None:
+                depth_col.image(colorize_depth(depth), use_container_width=True, caption="Depth (black = no reading)")
+            if circles:
+                u, v, r, _ = circles[0]
+                p = measure(circles[0], depth, settings["cap_d"])
+                st.caption(f"Circle at ({u:.0f}, {v:.0f}) px, r {r:.0f} px · camera frame x {p['x']:.1f}, "
+                           f"y {p['y']:.1f}, z {p['z']:.1f} mm ({'depth' if p['method'] == 'depth' else 'from cap size'}"
+                           f", depth valid {p['valid']:.0%}) · {len(rejected)} other circles rejected")
+            else:
+                st.caption(f"No cap found ({len(rejected)} circles rejected).")
+    
+        @st.fragment(run_every=1.0 if live else None)
+        def cam_feed_plain(settings):
+            try:
+                bgr, depth = capture()
+            except Exception as e:
+                st.warning(f"Could not read {CAM}: {e}")
+                return
+            plan, m = st.session_state.get("yg_plan"), st.session_state.get("yg_meas")
+            note = ""
+            if plan is not None and m is not None:
+                try:   # orientation is kept by every YOLO move, so the camera has only translated since Locate
+                    now = end_pose()
+                    if same_orientation(now, m["end"]):
+                        cap = dict(m["cap"], origin=m["cap"]["origin"] + np.array([now[k] - m["end"][k] for k in ("x", "y", "z")]))
+                        for pt, col in ((plan["A"], (0, 0, 255)), (plan["A"] - plan["lat"] * 42, (255, 0, 255)),
+                                        (plan["A"] + plan["lat"] * 42, (255, 0, 255))):
+                            u, v = YG.project(cap, pt)
+                            cv2.drawMarker(bgr, (int(u), int(v)), col, cv2.MARKER_CROSS, 40, 3)
+                        note = "Red cross: the planned grasp point projected from where the arm is now (it should sit on the bottle)."
+                except Exception:
+                    pass
+            img_col, depth_col = st.columns(2) if show_depth and depth is not None else (st.container(), None)
+            img_col.image(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), use_container_width=True, caption=note or None)
+            if depth_col is not None:
+                depth_col.image(colorize_depth(depth), use_container_width=True, caption="Depth (black = no reading)")
+    
+        with feed_col:
+            if marker_mode:
+                cam_feed_plain(settings)
+                yolo_result()
+            else:
+                cam_feed_cap(settings)
+    
+    
+    # ---------- standalone YOLO viewer (read-only, independent of sequence/calibration) ----------
     st.divider()
-    st.subheader(f"Unscrew cap — arm2")
-    busy = UNSCREWER.running or FULL_RUNNING
-    with st.container(border=True):
-        c1, c2, c3, c4 = st.columns(4)
-        twists = c1.number_input("Twists", 1, 20, 4)
-        twist_deg = c2.number_input("Degrees per twist", 10.0, 170.0, 120.0, 5.0)
-        final_lift = c3.number_input("Final lift (mm)", 0.0, 100.0, 30.0, 5.0,
-                                     help="After the last twist, lift this far while holding the cap; it ends there.")
-        grip_force = c4.number_input("Grip force (%)", 1, 100, 60, 5,
-                                     help="G2 gripper grasp force for every grab; reset to 50% afterwards.")
-        c1, c2, c3, c4 = st.columns(4)
-        speed = c1.number_input("Speed (°/s)", 3.0, 60.0, 60.0, 1.0)
-        release = c2.number_input("Release opening (0–850)", 100, 850, 500, 25,
-                                  help="How far the gripper opens between twists; ~10 units per mm.")
-        direction = c3.selectbox("Direction (seen from above)", ["counter-clockwise (loosen)", "clockwise (tighten)"])
-        starts = [q["name"] for q in load_poses() if q.get("arm", "arm") == "arm2"]
-        start_pose = st.selectbox("Start pose", starts + ["(current pose)"],
-                                  index=starts.index(UNSCREW_START_POSE) if UNSCREW_START_POSE in starts else len(starts),
-                                  help="arm2 keyframe to move to first (gripper open), fingers around the cap.")
-        start_kf = next((q for q in load_poses() if q["name"] == start_pose), {})
-        start_joints = tuple(start_kf.get("values", ()))
-        start_target = tuple(float(start_kf["pose"][k]) for k in POSE_KEYS) if "pose" in start_kf else ()
-        dry_run = c4.toggle("Dry run (no cap)", value=True, help="Full cycle including open/close, but an empty grab "
-                            "is not an error. Use this first, without a cap, to check the wrist turns the right way.")
-        params = UnscrewParams(twists=twists, twist_deg=twist_deg, final_lift_mm=final_lift,
-                               speed_deg_s=speed, release_pos=release, dry_run=dry_run,
-                               start_pose=start_pose if start_kf else "", start_joints=start_joints,
-                               start_target=start_target,
-                               grip_force_pct=int(grip_force),
-                               loosen_sign=-1 if direction.startswith("counter") else 1)
-        b1, b2, _ = st.columns([1, 1, 2])
-        if b1.button("🔓 Unscrew", type="primary", use_container_width=True, disabled=busy):
-            confirm_unscrew(params)
-        if b2.button("⏹ Stop", use_container_width=True, disabled=not UNSCREWER.running):
-            UNSCREWER.stop()
+    st.subheader("YOLO bottle preview — Arm 1 camera")
+    st.caption("Watch bottle detection from cam at any arm position. Green marks the leftmost visible bottle; "
+               "yellow marks other bottles. This viewer never moves the arm or runs a sequence.")
+    yolo_live = st.toggle("Live YOLO preview", value=True, key="yolo_live")
+    yolo_confidence = st.slider("Preview confidence threshold", .1, 1., .65, .05, key="yolo_confidence",
+                                help="Only changes this preview. Sequence detection stays at 0.65.")
+    yolo_show_all = st.toggle("Show other detected objects", value=False, key="yolo_show_all",
+                              help="Also show other classes in blue to see whether YOLO labels a bottle as something else.")
+    
+    
+    @st.fragment(run_every=2.0 if yolo_live else None)
+    def yolo_preview_panel(confidence, show_all):
+        st.button("Refresh YOLO preview", key="yolo_refresh", help="Capture another frame without moving the arm.")
+        if "arm" not in CAM_RIGS:
+            st.warning("Arm 1 camera is unavailable.")
+            return
+        try:
+            image, count = YG.preview(run, ROBOT, CAM_RIGS["arm"][0], confidence=confidence, show_all=show_all)
+        except Exception as exc:
+            st.warning(f"YOLO preview unavailable: {exc}")
+            return
+        st.image(image, width="stretch")
+        st.caption(f"{count} bottle(s) at confidence ≥ {confidence:.0%} · "
+                   f"captured {time.strftime('%H:%M:%S')} · {'Live: refreshes every 2 seconds' if yolo_live else 'Paused: click Refresh for a new frame'}")
+        if count == 0:
+            st.info("No bottles detected at this threshold. Try lowering it or showing other detected objects.")
+    
+    
+    yolo_preview_panel(yolo_confidence, yolo_show_all)
+    
+    
+    # ---------- unscrew (cap_unscrew.py) ----------
+    @st.dialog("Unscrew cap", width="large")
+    def confirm_unscrew(params):
+        problem = None if (params.start_joints or params.start_target) else UNSCREWER.check()  # start pose: checked on arrival
+        if problem:
+            st.error(problem)
+            return
+        st.write(f"Run this on **arm2** / **gripper2**?")
+        for line in describe(params):
+            st.markdown(f"- {line}")
+        st.caption("The other arm must already be holding the bottle. Keep the e-stop in reach.")
+        if st.button("Yes, unscrew", type="primary"):
+            UNSCREWER.start(params)
             st.rerun()
-
-        @st.fragment(run_every=1.0)
-        def unscrew_status():
-            s = UNSCREWER.status()
-            if s["state"] == "running":
-                st.info(f"Running: {s['step']}")
-            elif s["state"] == "done":
-                st.success("Unscrew complete." + (f" ({s['error']})" if s.get("error") else ""))
-            elif s["state"] in ("error", "stopped"):
-                st.error(f"Unscrew {s['state']} at '{s['step']}': {s['error']}")
-
-        unscrew_status()
-
-
-# ---------- full run (bottle_task.py): arm's sequence, arm2's keyframes -> unscrew -> trash drop ----------
-@st.dialog("Full run", width="large")
-def confirm_full_run(keyframes, params, drop, retreat, via, alongside):
-    st.write("Run all three phases, one after another?")
-    st.markdown("**1. Keyframes** (all of arm's, then arm2's)")
-    for n, kf in enumerate(keyframes):
-        st.markdown(f"- {kf['arm']} → **{kf['name']}**" + (f", then gripper {kf['gripper']}" if kf.get("gripper") else "")
-                    + (f", wait {kf['delay']:g} s" if kf.get("delay") else ""))
-        if n == 0 and alongside is not None:
-            st.markdown(f"  - **starting at the same time:** {alongside['arm']} → **{alongside['name']}**"
-                        + (f", then gripper {alongside['gripper']}" if alongside.get("gripper") else "")
-                        + f" — {kf['arm']} waits at {kf['name']} until {alongside['arm']} has arrived, then continues")
-    st.markdown(f"**2. Unscrew** (arm2, settings from the Unscrew panel)")
-    for line in describe(params):
-        st.markdown(f"- {line}")
-    st.markdown("**3. Retreat and drop**")
-    if retreat is not None:
-        st.markdown(f"- {retreat['arm']} straight up to **{retreat['name']}**'s height, holding the cap "
-                    "(orientation kept as the unscrew left it; gripper unchanged)")
-    for kf in via:
-        st.markdown(f"- {kf['arm']} → **{kf['name']}** holding the cap (move only; gripper unchanged)")
-    st.markdown(f"- {drop['arm']} → **{drop['name']}**" + (f", then gripper {drop['gripper']}" if drop.get("gripper") else ""))
-    if params.dry_run:
-        st.warning("Unscrew is in dry-run mode (empty grabs allowed). Turn it off in the Unscrew panel for a real cap.")
-    st.caption("arm's sequence must end holding the bottle (its last keyframe has no gripper action). Keep the "
-               "e-stop in reach; STOP ALL or Stop halts every phase.")
-    if st.button("Yes, run all", type="primary"):
-        if safely(BOTTLE_TASK.start, keyframes, params, drop, retreat, via, alongside):
-            st.rerun()
-
-
-if BOTTLE_TASK is not None:
+    
+    
+    if UNSCREWER is not None:
+        st.divider()
+        st.subheader(f"Unscrew cap — arm2")
+        busy = UNSCREWER.running or FULL_RUNNING
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns(4)
+            twists = c1.number_input("Twists", 1, 20, 4)
+            twist_deg = c2.number_input("Degrees per twist", 10.0, 170.0, 120.0, 5.0)
+            final_lift = c3.number_input("Final lift (mm)", 0.0, 100.0, 30.0, 5.0,
+                                         help="After the last twist, lift this far while holding the cap; it ends there.")
+            grip_force = c4.number_input("Grip force (%)", 1, 100, 60, 5,
+                                         help="G2 gripper grasp force for every grab; reset to 50% afterwards.")
+            c1, c2, c3, c4 = st.columns(4)
+            speed = c1.number_input("Speed (°/s)", 3.0, 60.0, 60.0, 1.0)
+            release = c2.number_input("Release opening (0–850)", 100, 850, 500, 25,
+                                      help="How far the gripper opens between twists; ~10 units per mm.")
+            direction = c3.selectbox("Direction (seen from above)", ["counter-clockwise (loosen)", "clockwise (tighten)"])
+            starts = [q["name"] for q in load_poses() if q.get("arm", "arm") == "arm2"]
+            start_pose = st.selectbox("Start pose", starts + ["(current pose)"],
+                                      index=starts.index(UNSCREW_START_POSE) if UNSCREW_START_POSE in starts else len(starts),
+                                      help="arm2 keyframe to move to first (gripper open), fingers around the cap.")
+            start_kf = next((q for q in load_poses() if q["name"] == start_pose), {})
+            start_joints = tuple(start_kf.get("values", ()))
+            start_target = tuple(float(start_kf["pose"][k]) for k in POSE_KEYS) if "pose" in start_kf else ()
+            dry_run = c4.toggle("Dry run (no cap)", value=True, help="Full cycle including open/close, but an empty grab "
+                                "is not an error. Use this first, without a cap, to check the wrist turns the right way.")
+            params = UnscrewParams(twists=twists, twist_deg=twist_deg, final_lift_mm=final_lift,
+                                   speed_deg_s=speed, release_pos=release, dry_run=dry_run,
+                                   start_pose=start_pose if start_kf else "", start_joints=start_joints,
+                                   start_target=start_target,
+                                   grip_force_pct=int(grip_force),
+                                   loosen_sign=-1 if direction.startswith("counter") else 1)
+            b1, b2, _ = st.columns([1, 1, 2])
+            if b1.button("🔓 Unscrew", type="primary", use_container_width=True, disabled=busy):
+                confirm_unscrew(params)
+            if b2.button("⏹ Stop", use_container_width=True, disabled=not UNSCREWER.running):
+                UNSCREWER.stop()
+                st.rerun()
+    
+            @st.fragment(run_every=1.0)
+            def unscrew_status():
+                s = UNSCREWER.status()
+                if s["state"] == "running":
+                    st.info(f"Running: {s['step']}")
+                elif s["state"] == "done":
+                    st.success("Unscrew complete." + (f" ({s['error']})" if s.get("error") else ""))
+                elif s["state"] in ("error", "stopped"):
+                    st.error(f"Unscrew {s['state']} at '{s['step']}': {s['error']}")
+    
+            unscrew_status()
+    
+    
+    # ---------- full run (bottle_task.py): arm's sequence, arm2's keyframes -> unscrew -> trash drop ----------
+    @st.dialog("Full run", width="large")
+    def confirm_full_run(keyframes, params, drop, retreat, via, alongside):
+        st.write("Run all three phases, one after another?")
+        st.markdown("**1. Keyframes** (all of arm's, then arm2's)")
+        for n, kf in enumerate(keyframes):
+            st.markdown(f"- {kf['arm']} → **{kf['name']}**" + (f", then gripper {kf['gripper']}" if kf.get("gripper") else "")
+                        + (f", wait {kf['delay']:g} s" if kf.get("delay") else ""))
+            if n == 0 and alongside is not None:
+                st.markdown(f"  - **starting at the same time:** {alongside['arm']} → **{alongside['name']}**"
+                            + (f", then gripper {alongside['gripper']}" if alongside.get("gripper") else "")
+                            + f" — {kf['arm']} waits at {kf['name']} until {alongside['arm']} has arrived, then continues")
+        st.markdown(f"**2. Unscrew** (arm2, settings from the Unscrew panel)")
+        for line in describe(params):
+            st.markdown(f"- {line}")
+        st.markdown("**3. Retreat and drop**")
+        if retreat is not None:
+            st.markdown(f"- {retreat['arm']} straight up to **{retreat['name']}**'s height, holding the cap "
+                        "(orientation kept as the unscrew left it; gripper unchanged)")
+        for kf in via:
+            st.markdown(f"- {kf['arm']} → **{kf['name']}** holding the cap (move only; gripper unchanged)")
+        st.markdown(f"- {drop['arm']} → **{drop['name']}**" + (f", then gripper {drop['gripper']}" if drop.get("gripper") else ""))
+        if params.dry_run:
+            st.warning("Unscrew is in dry-run mode (empty grabs allowed). Turn it off in the Unscrew panel for a real cap.")
+        st.caption("arm's sequence must end holding the bottle (its last keyframe has no gripper action). Keep the "
+                   "e-stop in reach; STOP ALL or Stop halts every phase.")
+        if st.button("Yes, run all", type="primary"):
+            if safely(BOTTLE_TASK.start, keyframes, params, drop, retreat, via, alongside):
+                st.rerun()
+    
+    
+    if BOTTLE_TASK is not None:
+        st.divider()
+        st.subheader("Full run — arm's sequence → arm2: keyframes → unscrew → retreat → trash drop")
+        all_kf = load_poses()
+        drop_kf = next((k for k in all_kf if k["name"] == TRASH_DROP_POSE), None)
+        pre_kf = [k for k in poses_io.sequence(all_kf, "arm_then_arm2") if k["name"] != TRASH_DROP_POSE]
+        # arm2 goes to its start pose while arm does its first keyframe, then skips it in its own part
+        alongside_kf = next((k for k in pre_kf if k["arm"] == "arm2" and k["name"] == ALONGSIDE_POSE), None)
+        if alongside_kf is not None and pre_kf and pre_kf[0]["arm"] != "arm2":
+            pre_kf = [k for k in pre_kf if k is not alongside_kf]
+        else:
+            alongside_kf = None
+        retreat_kf = next((k for k in all_kf if k["name"] == RETREAT_POSE), None)
+        via_kf = [k for name in VIA_POSES for k in all_kf if k["name"] == name]
+        with st.container(border=True):
+            if drop_kf is None:
+                st.warning(f"Save a keyframe named `{TRASH_DROP_POSE}` (where the cap is dropped) to enable the full run.")
+            else:
+                st.caption(f"1. Keyframes: {' → '.join(k['name'] for k in pre_kf) or '(none)'}"
+                           + (f" (arm2 → {alongside_kf['name']} starts together with {pre_kf[0]['name']})" if alongside_kf else "") + " · "
+                           f"2. Unscrew with the settings above (start **{params.start_pose or 'current pose'}**, "
+                           f"{'dry run' if params.dry_run else 'real cap'}) · "
+                           + (f"3. straight up to **{RETREAT_POSE}**'s height holding the cap, then " if retreat_kf else "3. ")
+                           + "".join(f"via **{k['name']}**, then " for k in via_kf)
+                           + f"{drop_kf['arm']} to **{TRASH_DROP_POSE}**, then gripper {drop_kf.get('gripper') or 'unchanged'}.")
+            f1, f2, _ = st.columns([1, 1, 2])
+            if f1.button("▶ Full run", type="primary", use_container_width=True,
+                         disabled=drop_kf is None or busy or FULL_RUNNING):
+                confirm_full_run(pre_kf, params, drop_kf, retreat_kf, via_kf, alongside_kf)
+            if f2.button("⏹ Stop full run", use_container_width=True, disabled=not FULL_RUNNING):
+                BOTTLE_TASK.stop()
+                st.rerun()
+    
+            @st.fragment(run_every=1.0)
+            def full_run_status():
+                s = BOTTLE_TASK.status()
+                if s["state"] == "running":
+                    st.info(f"Running: {s['step']}")
+                elif s["state"] == "done":
+                    st.success("Full run complete.")
+                elif s["state"] in ("error", "stopped"):
+                    st.error(f"Full run {s['state']} at '{s['step']}': {s['error']}")
+                if s["state"] != "running" and FULL_RUNNING:
+                    st.rerun()  # finished: refresh so the buttons unlock
+    
+            full_run_status()
+    
+    
+    # ---------- keyframe table ----------
+    def set_delay(pose_name):
+        all_poses = load_poses()
+        for q in all_poses:
+            if q["name"] == pose_name:
+                q["delay"] = st.session_state[f"delay_{pose_name}"]
+        save_poses(all_poses)
+    
+    
+    
     st.divider()
-    st.subheader("Full run — arm's sequence → arm2: keyframes → unscrew → retreat → trash drop")
-    all_kf = load_poses()
-    drop_kf = next((k for k in all_kf if k["name"] == TRASH_DROP_POSE), None)
-    pre_kf = [k for k in poses_io.sequence(all_kf, "arm_then_arm2") if k["name"] != TRASH_DROP_POSE]
-    # arm2 goes to its start pose while arm does its first keyframe, then skips it in its own part
-    alongside_kf = next((k for k in pre_kf if k["arm"] == "arm2" and k["name"] == ALONGSIDE_POSE), None)
-    if alongside_kf is not None and pre_kf and pre_kf[0]["arm"] != "arm2":
-        pre_kf = [k for k in pre_kf if k is not alongside_kf]
+    st.subheader("Sequence steps (play order, top → bottom)")
+    poses = load_poses()
+    if not poses:
+        st.info("No keyframes yet. Jog the arm to a pose and save it above.")
     else:
-        alongside_kf = None
-    retreat_kf = next((k for k in all_kf if k["name"] == RETREAT_POSE), None)
-    via_kf = [k for name in VIA_POSES for k in all_kf if k["name"] == name]
-    with st.container(border=True):
-        if drop_kf is None:
-            st.warning(f"Save a keyframe named `{TRASH_DROP_POSE}` (where the cap is dropped) to enable the full run.")
-        else:
-            st.caption(f"1. Keyframes: {' → '.join(k['name'] for k in pre_kf) or '(none)'}"
-                       + (f" (arm2 → {alongside_kf['name']} starts together with {pre_kf[0]['name']})" if alongside_kf else "") + " · "
-                       f"2. Unscrew with the settings above (start **{params.start_pose or 'current pose'}**, "
-                       f"{'dry run' if params.dry_run else 'real cap'}) · "
-                       + (f"3. straight up to **{RETREAT_POSE}**'s height holding the cap, then " if retreat_kf else "3. ")
-                       + "".join(f"via **{k['name']}**, then " for k in via_kf)
-                       + f"{drop_kf['arm']} to **{TRASH_DROP_POSE}**, then gripper {drop_kf.get('gripper') or 'unchanged'}.")
-        f1, f2, _ = st.columns([1, 1, 2])
-        if f1.button("▶ Full run", type="primary", use_container_width=True,
-                     disabled=drop_kf is None or busy or FULL_RUNNING):
-            confirm_full_run(pre_kf, params, drop_kf, retreat_kf, via_kf, alongside_kf)
-        if f2.button("⏹ Stop full run", use_container_width=True, disabled=not FULL_RUNNING):
-            BOTTLE_TASK.stop()
-            st.rerun()
-
-        @st.fragment(run_every=1.0)
-        def full_run_status():
-            s = BOTTLE_TASK.status()
-            if s["state"] == "running":
-                st.info(f"Running: {s['step']}")
-            elif s["state"] == "done":
-                st.success("Full run complete.")
-            elif s["state"] in ("error", "stopped"):
-                st.error(f"Full run {s['state']} at '{s['step']}': {s['error']}")
-            if s["state"] != "running" and FULL_RUNNING:
-                st.rerun()  # finished: refresh so the buttons unlock
-
-        full_run_status()
-
-
-# ---------- keyframe table ----------
-def set_delay(pose_name):
-    all_poses = load_poses()
-    for q in all_poses:
-        if q["name"] == pose_name:
-            q["delay"] = st.session_state[f"delay_{pose_name}"]
-    save_poses(all_poses)
-
-
-
-st.divider()
-st.subheader("Sequence steps (play order, top → bottom)")
-poses = load_poses()
-if not poses:
-    st.info("No keyframes yet. Jog the arm to a pose and save it above.")
-else:
-    COLS = [0.4, 2, 1, 4, 1, 1.4, 3]
-    header = st.columns(COLS)
-    for col, text in zip(header, ["#", "Name", "Arm", "Action / joints / pose", "Gripper", "Delay after (s)", ""]):
-        col.markdown(f"**{text}**")
-    for i, p in enumerate(poses):
-        row = st.columns(COLS)
-        row[0].write(i + 1)
-        row[1].write(p["name"])
-        row[2].write(p.get("arm", "arm"))
-        row[3].code(keyframe_text(p), language=None)
-        row[4].write(p.get("gripper") or "–")
-        row[5].number_input(
-            "Delay after (s)", min_value=0.0, max_value=600.0, step=0.5, value=float(p.get("delay", 0.0)),
-            key=f"delay_{p['name']}", label_visibility="collapsed", on_change=set_delay, args=(p["name"],),
-        )
-        go_c, up_c, down_c, del_c = row[6].columns(4)
-        if go_c.button("Go", key=f"go{i}"):
-            confirm_go(i)
-        if up_c.button("↑", key=f"up{i}", disabled=i == 0):
-            poses[i - 1], poses[i] = poses[i], poses[i - 1]
-            save_poses(poses)
-            st.rerun()
-        if down_c.button("↓", key=f"dn{i}", disabled=i == len(poses) - 1):
-            poses[i + 1], poses[i] = poses[i], poses[i + 1]
-            save_poses(poses)
-            st.rerun()
-        if del_c.button("✕", key=f"del{i}"):
-            st.session_state.pop(f"delay_{p['name']}", None)
-            save_poses(poses[:i] + poses[i + 1:])
-            st.rerun()
-
-    selection = st.radio("Run which steps", list(poses_io.RUN_OPTIONS), format_func=poses_io.RUN_OPTIONS.get,
-                         horizontal=True, key="run_selection",
-                         help="arm, then arm2: all of arm's keyframes first, then all of arm2's, whatever the "
-                              "table order.")
-    chosen = poses_io.sequence(poses, selection)
-    st.caption(f"{len(chosen)} step(s) selected · total programmed delay "
-               f"{sum(q.get('delay', 0.0) for q in chosen[:-1]):g} s (the last keyframe's delay is ignored)")
-    run_c, _ = st.columns([1, 3])
-    if run_c.button("▶ Run sequence", type="primary", use_container_width=True, disabled=FULL_RUNNING):
-        confirm_run(selection)
-
-    with st.expander("Export as Python"):
-        lines = ["POSES = {"]
-        for p in poses:
-            target = p["pose"] if "pose" in p else [round(v, 3) for v in p["values"]]
-            lines.append(f"    {p['name']!r}: ({p.get('arm', 'arm')!r}, {target}, {p.get('delay', 0.0):g}),")
-        lines.append("}")
-        st.code("\n".join(lines), language="python")
-
-
-TAB_FULL.__exit__(None, None, None)
+        COLS = [0.4, 2, 1, 4, 1, 1.4, 3]
+        header = st.columns(COLS)
+        for col, text in zip(header, ["#", "Name", "Arm", "Action / joints / pose", "Gripper", "Delay after (s)", ""]):
+            col.markdown(f"**{text}**")
+        for i, p in enumerate(poses):
+            row = st.columns(COLS)
+            row[0].write(i + 1)
+            row[1].write(p["name"])
+            row[2].write(p.get("arm", "arm"))
+            row[3].code(keyframe_text(p), language=None)
+            row[4].write(p.get("gripper") or "–")
+            row[5].number_input(
+                "Delay after (s)", min_value=0.0, max_value=600.0, step=0.5, value=float(p.get("delay", 0.0)),
+                key=f"delay_{p['name']}", label_visibility="collapsed", on_change=set_delay, args=(p["name"],),
+            )
+            go_c, up_c, down_c, del_c = row[6].columns(4)
+            if go_c.button("Go", key=f"go{i}"):
+                confirm_go(i)
+            if up_c.button("↑", key=f"up{i}", disabled=i == 0):
+                poses[i - 1], poses[i] = poses[i], poses[i - 1]
+                save_poses(poses)
+                st.rerun()
+            if down_c.button("↓", key=f"dn{i}", disabled=i == len(poses) - 1):
+                poses[i + 1], poses[i] = poses[i], poses[i + 1]
+                save_poses(poses)
+                st.rerun()
+            if del_c.button("✕", key=f"del{i}"):
+                st.session_state.pop(f"delay_{p['name']}", None)
+                save_poses(poses[:i] + poses[i + 1:])
+                st.rerun()
+    
+        selection = st.radio("Run which steps", list(poses_io.RUN_OPTIONS), format_func=poses_io.RUN_OPTIONS.get,
+                             horizontal=True, key="run_selection",
+                             help="arm, then arm2: all of arm's keyframes first, then all of arm2's, whatever the "
+                                  "table order.")
+        chosen = poses_io.sequence(poses, selection)
+        st.caption(f"{len(chosen)} step(s) selected · total programmed delay "
+                   f"{sum(q.get('delay', 0.0) for q in chosen[:-1]):g} s (the last keyframe's delay is ignored)")
+        run_c, _ = st.columns([1, 3])
+        if run_c.button("▶ Run sequence", type="primary", use_container_width=True, disabled=FULL_RUNNING):
+            confirm_run(selection)
+    
+        with st.expander("Export as Python"):
+            lines = ["POSES = {"]
+            for p in poses:
+                target = p["pose"] if "pose" in p else [round(v, 3) for v in p["values"]]
+                lines.append(f"    {p['name']!r}: ({p.get('arm', 'arm')!r}, {target}, {p.get('delay', 0.0):g}),")
+            lines.append("}")
+            st.code("\n".join(lines), language="python")
+    
+    
 
 
 # ---------- Simple tab: reset arm 1, and the YOLO pick & place (yolo_grab.reset_arm / pick_and_place) ----------
