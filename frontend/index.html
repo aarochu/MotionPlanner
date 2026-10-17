@@ -1124,7 +1124,7 @@ async function alignPlan() {
     document.getElementById("alignResult").innerHTML = `
       <div class="metric">Cap world: x ${plan.cap_world.x} y ${plan.cap_world.y} z ${plan.cap_world.z} mm</div>
       <div class="metric">Gripper world: x ${plan.grip_world.x} y ${plan.grip_world.y} z ${plan.grip_world.z} mm</div>
-      <div class="metric">Move: x ${plan.delta.x:+.1f} y ${plan.delta.y:+.1f} z ${plan.delta.z:+.1f} mm · distance ${plan.norm} mm</div>
+      <div class="metric">Move: x ${(plan.delta.x >= 0 ? "+" : "") + plan.delta.x.toFixed(1)} y ${(plan.delta.y >= 0 ? "+" : "") + plan.delta.y.toFixed(1)} z ${(plan.delta.z >= 0 ? "+" : "") + plan.delta.z.toFixed(1)} mm · distance ${plan.norm.toFixed(1)} mm</div>
       ${plan.clamped ? `<div class="metric warn">Clamped to 100 mm max. Run Align again afterwards.</div>` : ""}
     `;
     window.lastCircle.plan = plan;
