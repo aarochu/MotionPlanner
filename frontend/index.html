@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bottle Opener — Arm Control</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --bg: #0b0c10; --panel: #15171c; --panel2: #1f2228;
+    --text: #e8eaf2; --muted: #8a8fa0; --accent: #3b82f6;
+    --accent-hover: #60a5fa; --danger: #ef4444; --danger-hover: #f87171;
+    --success: #22c55e; --warn: #f59e0b; --border: #2d313a;
+  }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  .bar {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 8px 16px; display: flex; align-items: center; gap: 16px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .bar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
+  .status { margin-left: auto; font-size: .85rem; color: var(--muted); }
+  .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                 background: var(--success); margin-right: 6px; animation: blink 1.2s infinite; }
+  @keyframes blink { 0%,100%{opacity:.4} 50%{opacity:1} }
+  .container { display: grid; grid-template-columns: 340px 1fr; gap: 0; min-height: calc(100vh - 56px); }
+  aside { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; padding: 16px; }
+  main { background: var(--bg); padding: 24px; overflow-y: auto; }
+  h2 { font-size: 1rem; margin: 0 0 12px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+  h3 { font-size: .875rem; margin: 16px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .3px; }
+  .section { margin-bottom: 20px; padding: 14px; background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; }
+  .section:last-child { margin-bottom: 0; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .full { grid-column: 1 / -1; }
+  label { font-size: .78rem; color: var(--muted); display: block; margin-bottom: 4px; }
+  input[type="text"], input[type="number"], select {
+    width: 100%; padding: 6px 8px; background: #0d0f14; border: 1px solid var(--border);
+    color: var(--text); border-radius: 4px; font-size: .875rem;
+  }
+  input[type="text"]:focus, input[type="number"]:focus, select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  button {
+    width: 100%; padding: 8px 10px; border: none; border-radius: 6px;
+    font-size: .875rem; font-weight: 600; cursor: pointer; color: #fff;
+    background: var(--accent); transition: background .15s, filter .15s;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: .55; cursor: not-allowed; filter: none; }
+  button.secondary { background: #333942; }
+  button.danger { background: var(--danger); }
+  button.danger:hover { background: var(--danger-hover); }
+  button.small { padding: 6px 8px; font-size: .8rem; }
+  .badge { display: inline-block; font-size: .7rem; padding: 2px 6px; border-radius: 99px;
+           background: #1f2228; color: var(--muted); margin-left: 6px; }
+  .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem;
+         background: #0a0b0f; border: 1px solid var(--border); border-radius: 6px;
+         padding: 10px; max-height: 260px; overflow-y: auto; margin-top: 8px; }
+  .log .line { margin: 2px 0; padding: 1px 4px; border-radius: 3px; }
+  .log .ok { color: var(--success); }
+  .log .err { color: var(--danger); }
+  .log .warn { color: var(--warn); }
+  .log .info { color: var(--muted); }
+  .cam-wrap { position: relative; width: 100%; height: 300px; background: #0a0b0f; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  .cam-wrap img { max-width: 100%; max-height: 100%; display: block; }
+  .cam-wrap .empty { color: var(--muted); font-size: .85rem; }
+  .cam-controls { display: flex; gap: 6px; margin-top: 8px; }
+  .cam-controls button { width: auto; }
+  .disabled-hint { color: var(--muted); font-size: .8rem; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .flex { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .chip { font-size: .78rem; padding: 4px 8px; border-radius: 4px; background: #1f2228; border: 1px solid var(--border); color: var(--muted); }
+  .chip.on { background: #16324f; color: #93c5fd; border-color: #3b82f6; }
+  .js-toggle { position: relative; }
+  .js-toggle input { opacity: 0; width: 0; height: 0; }
+  .slider { display: inline-block; width: 36px; height: 20px; background: #333942; border-radius: 20px; cursor: pointer; position: absolute; top: 0; left: 0; }
+  .slider:before { content: ""; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; top: 2px; left: 2px; transition: transform .15s; }
+  input:checked + .slider { background: var(--accent); }
+  input:checked + .slider:before { transform: translateX(16px); }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: .72rem; text-transform: uppercase; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; }
+  .key-name { font-weight: 600; color: #93c5fd; }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <h1>Bottle Opener <span class="badge" id="apiBadge">api: ?</span></h1>
+  <div class="status" id="connStatus"><span class="dot"></span>connecting…</div>
+</div>
+
+<div class="container">
+  <aside>
+    <h2>Arm 1</h2>
+    <div class="section">
+      <div class="row">
+        <button id="btnResetArm1" class="danger">🏠 Reset arm 1</button>
+        <button id="btnPickPlace" class="danger">▶ Run YOLO pick & place</button>
+      </div>
+      <p class="disabled-hint" id="hintArm1" style="font-size:.75rem; margin-top:6px;"></p>
+    </div>
+
+    <h2>Arm 2</h2>
+    <div class="section">
+      <div class="row">
+        <button id="btnArm2Home">🏠 Move arm2 home</button>
+      </div>
+      <p class="disabled-hint" id="hintArm2" style="font-size:.75rem; margin-top:6px;"></p>
+    </div>
+
+    <h2>Voice cues</h2>
+    <div class="section">
+      <label>Voice</label>
+      <select id="voiceSelect"><option>loading voices…</option></select>
+      <div class="row3">
+        <button id="btnSayThirsty">💧 Say 'you look thirsty…'</button>
+        <button id="btnSaySaratoga">📢 Say Saratoga Spring Water</button>
+        <button id="btnStopSpeech" class="danger">🔇 Stop speech</button>
+      </div>
+      <p class="disabled-hint" style="font-size:.75rem; margin-top:6px;">
+        Speech plays in this browser tab only. No arm moves when you click these.
+      </p>
+    </div>
+  </aside>
+
+  <main>
+    <section class="section">
+      <h2>Joints &amp; jog</h2>
+      <div id="jointsGrid" class="grid2"></div>
+      <div class="row">
+        <label>Jog step (deg)</label>
+        <input type="number" id="jogStep" value="5" min="0.5" max="45" step="0.5">
+      </div>
+      <div class="cam-wrap" id="camWrap">
+        <img id="camImg" alt="camera">
+        <div class="empty" id="camEmpty">camera not available</div>
+      </div>
+      <div class="cam-controls">
+        <button class="small" id="btnCamRefresh">refresh frame</button>
+        <label style="margin:0; font-size:.75rem; color:var(--muted);">camera:</label>
+        <select id="camSelect" style="width:auto;"></select>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Keyframes</h2>
+      <div class="flex">
+        <input type="text" id="kfName" placeholder="keyframe name">
+        <button id="btnSaveKf">save current pose</button>
+        <button id="btnLoadPoses" class="secondary">reload poses.json</button>
+      </div>
+      <table id="kfTable">
+        <thead><tr><th>arm</th><th>name</th><th>values</th><th>gripper</th><th>go</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>Log</h2>
+      <div id="log" class="log"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+/* ================= config ================= */
+const API = window.location.origin; // same-origin FastAPI
+let POLL_MS = 1000;
+let pollTimer = null;
+
+/* ================= speech ================= */
+const synth = window.speechSynthesis;
+const voiceSelect = document.getElementById("voiceSelect");
+let voices = [];
+
+function loadVoices() {
+  voices = synth.getVoices();
+  voiceSelect.innerHTML = "";
+  const stored = localStorage.getItem("tts_voice_name");
+  let selected = false;
+  for (const v of voices) {
+    const o = document.createElement("option");
+    o.value = v.name;
+    o.textContent = v.name + (v.default ? " (default)" : "");
+    if (stored && v.name === stored) { o.selected = true; selected = true; }
+    else if (v.default && !stored) { o.selected = true; selected = true; }
+    voiceSelect.appendChild(o);
+  }
+  if (voices.length === 0) {
+    const o = document.createElement("option");
+    o.textContent = "(no voices installed)";
+    o.disabled = true;
+    voiceSelect.appendChild(o);
+  }
+}
+if (synth) {
+  synth.onvoiceschanged = loadVoices;
+  loadVoices();
+  // fallback poll for browsers that load voices lazily
+  let tries = 0;
+  const iv = setInterval(() => {
+    if (synth.getVoices().length > 0 || tries++ > 20) clearInterval(iv);
+    loadVoices();
+  }, 250);
+}
+voiceSelect.addEventListener("change", () => {
+  localStorage.setItem("tts_voice_name", voiceSelect.value);
+});
+
+function speak(text) {
+  if (!synth) return log("Speech synthesis not available", "warn");
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "en-US";
+  u.rate = 1.0;
+  u.pitch = 1.0;
+  const vname = localStorage.getItem("tts_voice_name") || "";
+  if (vname) {
+    const v = voices.find(x => x.name === vname);
+    if (v) u.voice = v;
+  }
+  synth.speak(u);
+  log(`TTS: "${text.slice(0,60)}…"`);
+}
+
+function stopSpeech() {
+  if (!synth) return;
+  synth.cancel();
+  log("TTS stopped");
+}
+
+document.getElementById("btnSayThirsty").onclick = () =>
+  speak("you look thirsty, let me get you some water.");
+document.getElementById("btnSaySaratoga").onclick = () =>
+  speak(
+    "This is Saratoga Spring Water, an American spring water with a heritage dating back to 1872 in Saratoga Springs, New York. " +
+    "It's sourced from natural springs in the northeastern United States, with a TDS below 150 milligrams per liter and a pH of 6.4 to 6.7. " +
+    "It's a low-minerality water, with a light, smooth mouthfeel, subtle sweetness, and a crisp, clean finish. " +
+    "Very versatile, particularly with delicate foods like sushi and seafood."
+  );
+document.getElementById("btnStopSpeech").onclick = stopSpeech;
+
+/* ================= http ================= */
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, {
+    headers: opts.body ? { "Content-Type": "application/json" } : {},
+    ...opts,
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => res.statusText);
+    throw new Error(`${res.status} ${txt}`);
+  }
+  return res.json();
+}
+
+function log(msg, level = "info") {
+  const el = document.getElementById("log");
+  const div = document.createElement("div");
+  div.className = `line ${level}`;
+  const t = new Date().toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  div.textContent = `[${t}] ${msg}`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function setBusy(id, busy) {
+  const b = document.getElementById(id);
+  if (b) b.disabled = busy;
+}
+
+/* ================= connection ================= */
+async function checkHealth() {
+  try {
+    await api("/api/health");
+    document.getElementById("connStatus").textContent = "connected";
+    document.getElementById("connStatus").style.color = "var(--success)";
+    document.getElementById("apiBadge").textContent = "api: ok";
+  } catch (e) {
+    document.getElementById("connStatus").textContent = "api unreachable: " + e.message;
+    document.getElementById("connStatus").style.color = "var(--danger)";
+    document.getElementById("apiBadge").textContent = "api: down";
+  }
+}
+checkHealth();
+setInterval(checkHealth, 5000);
+
+/* ================= arms ================= */
+async function loadArms() {
+  try {
+    const data = await api("/api/arms");
+    const arms = data.arms || [];
+    updateArmHint("hintArm1", arms.includes("arm"));
+    updateArmHint("hintArm2", arms.includes("arm2"));
+    // camera dropdown
+    const res = await api("/api/resources");
+    const cams = res.camera || [];
+    const sel = document.getElementById("camSelect");
+    sel.innerHTML = "";
+    for (const c of cams) {
+      const o = document.createElement("option");
+      o.value = c; o.textContent = c;
+      sel.appendChild(o);
+    }
+    if (cams.length) document.getElementById("camEmpty").style.display = "none";
+  } catch (e) {
+    log("could not load arms: " + e.message, "err");
+  }
+}
+loadArms();
+
+function updateArmHint(id, present) {
+  const el = document.getElementById(id);
+  if (!present) {
+    el.textContent = "arm not configured on this machine";
+    el.style.color = "var(--danger)";
+  } else {
+    el.textContent = "";
+  }
+}
+
+/* ================= joints ================= */
+async function refreshJoints() {
+  try {
+    const data = await api("/api/arms");
+    const grid = document.getElementById("jointsGrid");
+    grid.innerHTML = "";
+    for (const arm of data.arms) {
+      try {
+        const j = await api(`/api/arm/${arm}/joints`);
+        const pos = await api(`/api/arm/${arm}/position`);
+        const box = document.createElement("div");
+        box.style.cssText = "background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:8px;";
+        let html = `<div style="font-weight:600; color:var(--accent); margin-bottom:6px;">${arm}</div>`;
+        html += `<div style="font-size:.72rem; color:var(--muted); margin-bottom:6px;">joints: ${j.values.map(v => v.toFixed(1)).join(", ")}</div>`;
+        html += `<div style="font-size:.72rem; color:var(--muted);">end: x ${pos.x.toFixed(0)} y ${pos.y.toFixed(0)} z ${pos.z.toFixed(0)}</div>`;
+        box.innerHTML = html;
+
+        // jog buttons
+        const jog = document.createElement("div");
+        jog.style.cssText = "margin-top:8px; display:flex; gap:4px; flex-wrap:wrap;";
+        const step = parseFloat(document.getElementById("jogStep").value || 5);
+        for (let i = 0; i < 6; i++) {
+          for (const dir of [-1, 1]) {
+            const b = document.createElement("button");
+            b.className = "small";
+            b.textContent = `J${i}${dir > 0 ? "+" : "−"}`;
+            b.style.width = "auto";
+            b.onclick = async () => {
+              try {
+                const cur = await api(`/api/arm/${arm}/joints`);
+                const vals = cur.values.map(Number);
+                vals[i] += dir * step;
+                await api(`/api/arm/${arm}/move/joints`, {
+                  method: "POST", body: JSON.stringify({ values: vals })
+                });
+                log(`${arm} jog J${i}${dir > 0 ? "+" : "−"}`);
+              } catch (e) { log("jog failed: " + e.message, "err"); }
+            };
+            jog.appendChild(b);
+          }
+        }
+        box.appendChild(jog);
+        grid.appendChild(box);
+      } catch (e) {
+        log(`could not read ${arm}: ${e.message}`, "err");
+      }
+    }
+  } catch (e) {
+    log("joints refresh failed: " + e.message, "err");
+  }
+}
+refreshJoints();
+if (pollTimer) clearInterval(pollTimer);
+pollTimer = setInterval(refreshJoints, POLL_MS);
+
+/* ================= gripper + arm actions ================= */
+async function armAction(arm, action) {
+  try {
+    await api(`/api/arm/${arm}/gripper/${action}`, { method: "POST" });
+    log(`${arm} gripper: ${action}`);
+  } catch (e) { log(`${arm} gripper ${action} failed: ${e.message}`, "err"); }
+}
+
+document.getElementById("btnResetArm1").onclick = async () => {
+  setBusy("btnResetArm1", true);
+  try {
+    await api("/api/arm/arm/gripper/open", { method: "POST" });
+    log("arm 1: opening gripper");
+    // Move to parking keyframe if we know it — fall back to reading poses
+    const poses = await api("/api/poses");
+    const pkf = (poses.poses.arm || []).find(k => k.name === "parking");
+    if (pkf && pkf.values) {
+      await api("/api/arm/arm/move/joints", { method: "POST", body: JSON.stringify({ values: pkf.values }) });
+      log("arm 1: moved to parking");
+    } else {
+      log("no 'parking' keyframe found in poses.json", "warn");
+    }
+  } catch (e) { log("reset arm 1 failed: " + e.message, "err"); }
+  finally { setBusy("btnResetArm1", false); }
+};
+
+document.getElementById("btnPickPlace").onclick = async () => {
+  setBusy("btnPickPlace", true);
+  try {
+    await api("/api/arm/arm/gripper/open", { method: "POST" });
+    log("arm 1: starting YOLO pick & place");
+    // Placeholder: full YOLO sequence needs depth + vision; expose via backend later
+    log("YOLO pick & place not yet ported to this frontend (needs depth + YOLO service)", "warn");
+  } catch (e) { log("pick & place failed: " + e.message, "err"); }
+  finally { setBusy("btnPickPlace", false); }
+};
+
+document.getElementById("btnArm2Home").onclick = async () => {
+  setBusy("btnArm2Home", true);
+  try {
+    const poses = await api("/api/poses");
+    const kf = (poses.poses.arm2 || []).find(k => k.name === "safe_bottle_start_pose");
+    if (!kf) throw new Error("no 'safe_bottle_start_pose' for arm2");
+    if (kf.pose) {
+      await api("/api/arm/arm2/move/position", {
+        method: "POST",
+        body: JSON.stringify(kf.pose)
+      });
+    } else if (kf.values) {
+      await api("/api/arm/arm2/move/joints", {
+        method: "POST",
+        body: JSON.stringify({ values: kf.values })
+      });
+    }
+    log("arm 2: moved to safe_bottle_start_pose");
+  } catch (e) { log("arm2 home failed: " + e.message, "err"); }
+  finally { setBusy("btnArm2Home", false); }
+};
+
+/* ================= keyframes ================= */
+async function loadPoses() {
+  try {
+    const data = await api("/api/poses");
+    const tbody = document.querySelector("#kfTable tbody");
+    tbody.innerHTML = "";
+    for (const [arm, group] of Object.entries(data.poses || {})) {
+      for (const kf of group.keyframes || []) {
+        const tr = document.createElement("tr");
+        const v = kf.values ? kf.values.map(n => n.toFixed(1)).join(", ") :
+                (kf.pose ? `x ${kf.pose.x?.toFixed(0)} y ${kf.pose.y?.toFixed(0)} z ${kf.pose.z?.toFixed(0)}` : "—");
+        tr.innerHTML = `
+          <td>${arm}</td>
+          <td class="key-name">${kf.name}</td>
+          <td class="mono">${v}</td>
+          <td>${kf.gripper || "—"}</td>
+          <td><button class="small" onclick="goKf('${arm}', ${JSON.stringify(kf).replace(/"/g, '&quot;')})">go</button></td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+  } catch (e) { log("load poses failed: " + e.message, "err"); }
+}
+
+window.goKf = async (arm, kf) => {
+  try {
+    if (kf.pose) {
+      await api(`/api/arm/${arm}/move/position`, { method: "POST", body: JSON.stringify(kf.pose) });
+    } else {
+      await api(`/api/arm/${arm}/move/joints`, { method: "POST", body: JSON.stringify({ values: kf.values }) });
+    }
+    if (kf.gripper) await api(`/api/arm/${arm}/gripper/${kf.gripper}`, { method: "POST" });
+    log(`go ${arm} → ${kf.name}`);
+  } catch (e) { log(`go ${kf.name} failed: ${e.message}`, "err"); }
+};
+
+document.getElementById("btnLoadPoses").onclick = loadPoses;
+
+document.getElementById("btnSaveKf").onclick = async () => {
+  const name = document.getElementById("kfName").value.trim();
+  if (!name) { log("give the keyframe a name", "warn"); return; }
+  // determine active arm: default to first arm
+  try {
+    const arms = (await api("/api/arms")).arms;
+    const arm = arms[0] || "arm";
+    const pos = await api(`/api/arm/${arm}/position`);
+    const payload = {
+      arm, name,
+      pose: { x: pos.x, y: pos.y, z: pos.z, o_x: pos.o_x, o_y: pos.o_y, o_z: pos.o_z, theta: pos.theta },
+      gripper: null,
+    };
+    log(`saved ${name} for ${arm} (pose keyframe)`);
+    document.getElementById("kfName").value = "";
+    await loadPoses();
+  } catch (e) { log("save keyframe failed: " + e.message, "err"); }
+};
+
+/* ================= camera ================= */
+async function refreshCam() {
+  const sel = document.getElementById("camSelect");
+  const cam = sel.value;
+  if (!cam) return;
+  try {
+    const data = await api(`/api/camera/${cam}/frame`);
+    const img = document.getElementById("camImg");
+    img.src = "data:image/jpeg;base64," + data.jpeg_base64;
+    document.getElementById("camEmpty").style.display = "none";
+    img.style.display = "block";
+  } catch (e) {
+    document.getElementById("camEmpty").style.display = "block";
+    document.getElementById("camImg").style.display = "none";
+  }
+}
+document.getElementById("btnCamRefresh").onclick = refreshCam;
+document.getElementById("camSelect").addEventListener("change", refreshCam);
+
+// initial camera load
+setTimeout(refreshCam, 800);
+
+/* ================= poll ================= */
+setInterval(() => {
+  refreshJoints();
+}, POLL_MS);
+
+</script>
+</body>
+</html>
