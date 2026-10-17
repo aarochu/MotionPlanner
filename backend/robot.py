@@ -47,12 +47,7 @@ class Robot:
         if self._robot is None:
             async with self._lock:
                 if self._robot is None:
-                    opts = RobotClient.Options()
-                    if API_KEY_ID and API_KEY:
-                        opts = RobotClient.Options(
-                            refresh_interval=0,
-                            auth_entity=ADDRESS.split(".")[0],
-                        )
+                    opts = RobotClient.Options(refresh_interval=0)
                     self._robot = await RobotClient.at_address(ADDRESS, opts)
         return self._robot
 

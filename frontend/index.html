@@ -390,6 +390,7 @@
 const API = window.location.origin;
 let POLL_MS = 1000;
 let pollTimer = null;
+let lastJointsError = null;
 let camTimer = null;
 let camPreviewOn = false;
 let busyCount = 0;
@@ -648,6 +649,10 @@ function buildJointBox(arm, j, pos) {
 async function refreshJoints() {
   try {
     const data = await api("/api/arms");
+    if (lastJointsError !== null) {
+      lastJointsError = null;
+      log("joints refresh restored", "ok");
+    }
     const grid = document.getElementById("jointsGrid");
     const tgtGrid = document.getElementById("jointTargets");
     grid.innerHTML = "";
@@ -673,11 +678,18 @@ async function refreshJoints() {
         }
         tgtGrid.appendChild(box);
       } catch (e) {
-        log(`could not read ${arm}: ${e.message}`, "err");
+        const key = `arm-${arm}`;
+        if (lastJointsError !== key) {
+          lastJointsError = key;
+          log(`could not read ${arm}: ${e.message}`, "err");
+        }
       }
     }
   } catch (e) {
-    log("joints refresh failed: " + e.message, "err");
+    if (lastJointsError !== e.message) {
+      lastJointsError = e.message;
+      log("joints refresh failed: " + e.message, "err");
+    }
   }
 }
 refreshJoints();
