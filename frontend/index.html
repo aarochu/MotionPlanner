@@ -12,10 +12,8 @@
     --accent-hover: #60a5fa; --danger: #ef4444; --danger-hover: #f87171;
     --success: #22c55e; --warn: #f59e0b; --border: #2d313a;
   }
-  body {
-    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg); color: var(--text);
-  }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); }
   .bar {
     background: var(--panel); border-bottom: 1px solid var(--border);
     padding: 8px 16px; display: flex; align-items: center; gap: 16px;
@@ -25,8 +23,9 @@
   .status { margin-left: auto; font-size: .85rem; color: var(--muted); }
   .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
                  background: var(--success); margin-right: 6px; animation: blink 1.2s infinite; }
+  .status .dot.off { background: var(--danger); }
   @keyframes blink { 0%,100%{opacity:.4} 50%{opacity:1} }
-  .container { display: grid; grid-template-columns: 340px 1fr; gap: 0; min-height: calc(100vh - 56px); }
+  .container { display: grid; grid-template-columns: 360px 1fr; gap: 0; min-height: calc(100vh - 56px); }
   aside { background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto; padding: 16px; }
   main { background: var(--bg); padding: 24px; overflow-y: auto; }
   h2 { font-size: 1rem; margin: 0 0 12px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
@@ -47,15 +46,22 @@
     font-size: .875rem; font-weight: 600; cursor: pointer; color: #fff;
     background: var(--accent); transition: background .15s, filter .15s;
   }
-  button:hover { filter: brightness(1.1); }
-  button:active { transform: translateY(1px); }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  button:active:not(:disabled) { transform: translateY(1px); }
   button:disabled { opacity: .55; cursor: not-allowed; filter: none; }
   button.secondary { background: #333942; }
   button.danger { background: var(--danger); }
-  button.danger:hover { background: var(--danger-hover); }
-  button.small { padding: 6px 8px; font-size: .8rem; }
+  button.danger:hover:not(:disabled) { background: var(--danger-hover); }
+  button.small { padding: 6px 8px; font-size: .8rem; width: auto; }
   .badge { display: inline-block; font-size: .7rem; padding: 2px 6px; border-radius: 99px;
            background: #1f2228; color: var(--muted); margin-left: 6px; }
+  .busy-overlay { position: absolute; inset: 0; background: rgba(0,0,0,.45); border-radius: 8px;
+                  display: flex; flex-direction: column; align-items: center; justify-content: center;
+                  color: #fff; z-index: 10; pointer-events: none; opacity: 0; transition: opacity .2s; }
+  .busy-overlay.show { opacity: 1; }
+  .busy-overlay .spinner { width: 32px; height: 32px; border: 3px solid #333942; border-top-color: var(--accent);
+                           border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem;
          background: #0a0b0f; border: 1px solid var(--border); border-radius: 6px;
          padding: 10px; max-height: 260px; overflow-y: auto; margin-top: 8px; }
@@ -67,52 +73,110 @@
   .cam-wrap { position: relative; width: 100%; height: 300px; background: #0a0b0f; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
   .cam-wrap img { max-width: 100%; max-height: 100%; display: block; }
   .cam-wrap .empty { color: var(--muted); font-size: .85rem; }
-  .cam-controls { display: flex; gap: 6px; margin-top: 8px; }
+  .cam-controls { display: flex; gap: 6px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
   .cam-controls button { width: auto; }
-  .disabled-hint { color: var(--muted); font-size: .8rem; }
+  .cam-controls select { width: auto; padding: 4px 8px; font-size: .8rem; }
+  .disabled-hint { color: var(--muted); font-size: .78rem; margin-top: 6px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .flex { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .chip { font-size: .78rem; padding: 4px 8px; border-radius: 4px; background: #1f2228; border: 1px solid var(--border); color: var(--muted); }
   .chip.on { background: #16324f; color: #93c5fd; border-color: #3b82f6; }
-  .js-toggle { position: relative; }
-  .js-toggle input { opacity: 0; width: 0; height: 0; }
-  .slider { display: inline-block; width: 36px; height: 20px; background: #333942; border-radius: 20px; cursor: pointer; position: absolute; top: 0; left: 0; }
-  .slider:before { content: ""; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; top: 2px; left: 2px; transition: transform .15s; }
-  input:checked + .slider { background: var(--accent); }
-  input:checked + .slider:before { transform: translateX(16px); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; }
+  .key-name { font-weight: 600; color: #93c5fd; }
   table { width: 100%; border-collapse: collapse; font-size: .82rem; margin-top: 8px; }
   th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 600; font-size: .72rem; text-transform: uppercase; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; }
-  .key-name { font-weight: 600; color: #93c5fd; }
+  .setting-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .setting-row label { margin: 0; min-width: 150px; font-size: .8rem; }
+  .setting-row input { width: 110px; }
+  .btn-group { display: flex; gap: 6px; }
+  .btn-group button { width: auto; }
 </style>
 </head>
 <body>
 
 <div class="bar">
   <h1>Bottle Opener <span class="badge" id="apiBadge">api: ?</span></h1>
-  <div class="status" id="connStatus"><span class="dot"></span>connecting…</div>
+  <div class="status" id="connStatus"><span class="dot off"></span>disconnected</div>
 </div>
 
 <div class="container">
   <aside>
-    <h2>Arm 1</h2>
+    <!-- ARM 1 -->
+    <h2>Arm 1 <span class="badge" id="arm1Status">idle</span></h2>
     <div class="section">
       <div class="row">
         <button id="btnResetArm1" class="danger">🏠 Reset arm 1</button>
         <button id="btnPickPlace" class="danger">▶ Run YOLO pick & place</button>
       </div>
-      <p class="disabled-hint" id="hintArm1" style="font-size:.75rem; margin-top:6px;"></p>
+      <div class="busy-overlay" id="busyArm1"><div class="spinner"></div><div>arm 1 moving…</div></div>
+      <p class="disabled-hint" id="hintArm1"></p>
     </div>
 
-    <h2>Arm 2</h2>
+    <!-- ARM 2 -->
+    <h2>Arm 2 <span class="badge" id="arm2Status">idle</span></h2>
     <div class="section">
       <div class="row">
         <button id="btnArm2Home">🏠 Move arm2 home</button>
       </div>
-      <p class="disabled-hint" id="hintArm2" style="font-size:.75rem; margin-top:6px;"></p>
+      <div class="busy-overlay" id="busyArm2"><div class="spinner"></div><div>arm 2 moving…</div></div>
+      <p class="disabled-hint" id="hintArm2"></p>
     </div>
 
+    <!-- UNSCREW -->
+    <h2>Unscrew (arm 2)</h2>
+    <div class="section">
+      <div class="setting-row">
+        <label>Twists</label>
+        <input type="number" id="usTwists" value="4" min="1" max="10">
+      </div>
+      <div class="setting-row">
+        <label>Twist deg</label>
+        <input type="number" id="usTwistDeg" value="90" min="10" max="180">
+      </div>
+      <div class="setting-row">
+        <label>Release pos (0-850)</label>
+        <input type="number" id="usReleasePos" value="500" min="0" max="850">
+      </div>
+      <div class="setting-row">
+        <label>Final lift (mm)</label>
+        <input type="number" id="usFinalLift" value="30" min="0" max="100">
+      </div>
+      <div class="setting-row">
+        <label>Speed (°/s)</label>
+        <input type="number" id="usSpeed" value="20" min="1" max="100">
+      </div>
+      <div class="setting-row">
+        <label>Grip force (%)</label>
+        <input type="number" id="usGripForce" value="50" min="1" max="100">
+      </div>
+      <div class="setting-row">
+        <label style="min-width:150px;">Dry run</label>
+        <input type="checkbox" id="usDryRun" checked style="width:auto; min-width:auto;">
+      </div>
+      <div class="row">
+        <button id="btnUnscrew" class="danger">🔧 Run unscrew</button>
+        <button id="btnUnscrewStop" class="secondary small" disabled>⏹ Stop unscrew</button>
+      </div>
+      <div class="busy-overlay" id="busyUnscrew"><div class="spinner"></div><div>unscrewing…</div></div>
+      <button id="btnUnscrewDescribe" class="secondary small full" style="margin-top:8px;">Show unscrew steps</button>
+      <div id="usSteps" style="margin-top:8px; font-size:.78rem; color:var(--muted);"></div>
+    </div>
+
+    <!-- FULL RUN -->
+    <h2>Full run</h2>
+    <div class="section">
+      <p style="font-size:.78rem; color:var(--muted); margin-bottom:8px;">
+        Arm's keyframes → arm2 keyframes → unscrew → retreat → trash drop.
+      </p>
+      <div class="row">
+        <button id="btnFullRun" class="danger">▶ Run full sequence</button>
+        <button id="btnFullRunStop" class="secondary small" disabled>⏹ Stop run</button>
+      </div>
+      <div class="busy-overlay" id="busyFullRun"><div class="spinner"></div><div>full run…</div></div>
+    </div>
+
+    <!-- VOICE -->
     <h2>Voice cues</h2>
     <div class="section">
       <label>Voice</label>
@@ -122,13 +186,14 @@
         <button id="btnSaySaratoga">📢 Say Saratoga Spring Water</button>
         <button id="btnStopSpeech" class="danger">🔇 Stop speech</button>
       </div>
-      <p class="disabled-hint" style="font-size:.75rem; margin-top:6px;">
+      <p class="disabled-hint" style="margin-top:6px;">
         Speech plays in this browser tab only. No arm moves when you click these.
       </p>
     </div>
   </aside>
 
   <main>
+    <!-- JOINTS & JOG -->
     <section class="section">
       <h2>Joints &amp; jog</h2>
       <div id="jointsGrid" class="grid2"></div>
@@ -136,17 +201,24 @@
         <label>Jog step (deg)</label>
         <input type="number" id="jogStep" value="5" min="0.5" max="45" step="0.5">
       </div>
+    </section>
+
+    <!-- CAMERA -->
+    <section class="section">
+      <h2>Camera <span class="badge" id="camBadge">off</span></h2>
       <div class="cam-wrap" id="camWrap">
         <img id="camImg" alt="camera">
         <div class="empty" id="camEmpty">camera not available</div>
       </div>
       <div class="cam-controls">
-        <button class="small" id="btnCamRefresh">refresh frame</button>
+        <button class="small" id="btnCamToggle">▶ start preview</button>
+        <button class="small" id="btnCamRefresh">refresh</button>
         <label style="margin:0; font-size:.75rem; color:var(--muted);">camera:</label>
         <select id="camSelect" style="width:auto;"></select>
       </div>
     </section>
 
+    <!-- KEYFRAMES -->
     <section class="section">
       <h2>Keyframes</h2>
       <div class="flex">
@@ -160,6 +232,19 @@
       </table>
     </section>
 
+    <!-- RUN SEQUENCE -->
+    <section class="section">
+      <h2>Run sequence</h2>
+      <div class="row3">
+        <button id="btnRunArm1">▶ Arm 1 only</button>
+        <button id="btnRunArm2">▶ Arm 2 only</button>
+        <button id="btnRunBoth">▶ Arm 1 → Arm 2</button>
+      </div>
+      <div class="busy-overlay" id="busySequence"><div class="spinner"></div><div>running sequence…</div></div>
+      <p class="disabled-hint" id="hintSequence" style="margin-top:6px;"></p>
+    </section>
+
+    <!-- LOG -->
     <section class="section">
       <h2>Log</h2>
       <div id="log" class="log"></div>
@@ -169,9 +254,12 @@
 
 <script>
 /* ================= config ================= */
-const API = window.location.origin; // same-origin FastAPI
+const API = window.location.origin;
 let POLL_MS = 1000;
 let pollTimer = null;
+let camTimer = null;
+let camPreviewOn = false;
+let busyCount = 0;
 
 /* ================= speech ================= */
 const synth = window.speechSynthesis;
@@ -179,7 +267,7 @@ const voiceSelect = document.getElementById("voiceSelect");
 let voices = [];
 
 function loadVoices() {
-  voices = synth.getVoices();
+  voices = synth ? synth.getVoices() : [];
   voiceSelect.innerHTML = "";
   const stored = localStorage.getItem("tts_voice_name");
   let selected = false;
@@ -201,7 +289,6 @@ function loadVoices() {
 if (synth) {
   synth.onvoiceschanged = loadVoices;
   loadVoices();
-  // fallback poll for browsers that load voices lazily
   let tries = 0;
   const iv = setInterval(() => {
     if (synth.getVoices().length > 0 || tries++ > 20) clearInterval(iv);
@@ -213,12 +300,10 @@ voiceSelect.addEventListener("change", () => {
 });
 
 function speak(text) {
-  if (!synth) return log("Speech synthesis not available", "warn");
+  if (!synth) { log("Speech synthesis not available", "warn"); return; }
   synth.cancel();
   const u = new SpeechSynthesisUtterance(text);
-  u.lang = "en-US";
-  u.rate = 1.0;
-  u.pitch = 1.0;
+  u.lang = "en-US"; u.rate = 1.0; u.pitch = 1.0;
   const vname = localStorage.getItem("tts_voice_name") || "";
   if (vname) {
     const v = voices.find(x => x.name === vname);
@@ -258,6 +343,16 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
+function busy(show) {
+  if (show) busyCount++; else if (busyCount > 0) busyCount--;
+  const b = busyCount > 0;
+  document.querySelectorAll("button").forEach(btn => btn.disabled = b);
+  // stop buttons stay enabled during busy
+  document.querySelectorAll("[id$='Stop']").forEach(btn => btn.disabled = false);
+  document.getElementById("btnStopSpeech").disabled = false;
+  return b;
+}
+
 function log(msg, level = "info") {
   const el = document.getElementById("log");
   const div = document.createElement("div");
@@ -268,21 +363,28 @@ function log(msg, level = "info") {
   el.scrollTop = el.scrollHeight;
 }
 
-function setBusy(id, busy) {
-  const b = document.getElementById(id);
-  if (b) b.disabled = busy;
+function setBusyOverlay(id, show) {
+  const ov = document.getElementById(id);
+  if (ov) ov.classList.toggle("show", show);
+}
+
+function setStatus(id, text, kind = "idle") {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = "badge";
+  if (kind === "busy") el.classList.add("on");
+  else if (kind === "error") { el.textContent = "error"; el.style.color = "var(--danger)"; }
 }
 
 /* ================= connection ================= */
 async function checkHealth() {
   try {
     await api("/api/health");
-    document.getElementById("connStatus").textContent = "connected";
-    document.getElementById("connStatus").style.color = "var(--success)";
+    document.getElementById("connStatus").innerHTML = '<span class="dot"></span>connected';
     document.getElementById("apiBadge").textContent = "api: ok";
   } catch (e) {
-    document.getElementById("connStatus").textContent = "api unreachable: " + e.message;
-    document.getElementById("connStatus").style.color = "var(--danger)";
+    document.getElementById("connStatus").innerHTML = '<span class="dot off"></span>api unreachable';
     document.getElementById("apiBadge").textContent = "api: down";
   }
 }
@@ -294,9 +396,16 @@ async function loadArms() {
   try {
     const data = await api("/api/arms");
     const arms = data.arms || [];
-    updateArmHint("hintArm1", arms.includes("arm"));
-    updateArmHint("hintArm2", arms.includes("arm2"));
-    // camera dropdown
+    const hint1 = document.getElementById("hintArm1");
+    const hint2 = document.getElementById("hintArm2");
+    if (!arms.includes("arm")) {
+      hint1.textContent = "arm not configured on this machine";
+      hint1.style.color = "var(--danger)";
+    }
+    if (!arms.includes("arm2")) {
+      hint2.textContent = "arm2 not configured on this machine";
+      hint2.style.color = "var(--danger)";
+    }
     const res = await api("/api/resources");
     const cams = res.camera || [];
     const sel = document.getElementById("camSelect");
@@ -306,22 +415,42 @@ async function loadArms() {
       o.value = c; o.textContent = c;
       sel.appendChild(o);
     }
-    if (cams.length) document.getElementById("camEmpty").style.display = "none";
   } catch (e) {
     log("could not load arms: " + e.message, "err");
   }
 }
 loadArms();
 
-function updateArmHint(id, present) {
-  const el = document.getElementById(id);
-  if (!present) {
-    el.textContent = "arm not configured on this machine";
-    el.style.color = "var(--danger)";
-  } else {
-    el.textContent = "";
+/* ================= status polling ================= */
+async function pollStatus() {
+  try {
+    const st = await api("/api/status");
+    // arm1 status
+    const a1 = st.arms.arm;
+    if (a1 && !a1.error) setStatus("arm1Status", "idle");
+    // arm2 status
+    const a2 = st.arms.arm2;
+    if (a2 && !a2.error) setStatus("arm2Status", "idle");
+    // unscrew
+    if (st.unscrew && st.unscrew.state !== "idle") {
+      setStatus("arm2Status", st.unscrew.step, "busy");
+      document.getElementById("btnUnscrewStop").disabled = false;
+    } else {
+      document.getElementById("btnUnscrewStop").disabled = true;
+    }
+    // full run
+    if (st.full_run && st.full_run.state !== "idle") {
+      setStatus("arm1Status", st.full_run.step, "busy");
+      document.getElementById("btnFullRunStop").disabled = false;
+    } else {
+      document.getElementById("btnFullRunStop").disabled = true;
+    }
+  } catch (e) {
+    // ignore poll errors
   }
 }
+if (pollTimer) clearInterval(pollTimer);
+pollTimer = setInterval(pollStatus, POLL_MS);
 
 /* ================= joints ================= */
 async function refreshJoints() {
@@ -339,8 +468,6 @@ async function refreshJoints() {
         html += `<div style="font-size:.72rem; color:var(--muted); margin-bottom:6px;">joints: ${j.values.map(v => v.toFixed(1)).join(", ")}</div>`;
         html += `<div style="font-size:.72rem; color:var(--muted);">end: x ${pos.x.toFixed(0)} y ${pos.y.toFixed(0)} z ${pos.z.toFixed(0)}</div>`;
         box.innerHTML = html;
-
-        // jog buttons
         const jog = document.createElement("div");
         jog.style.cssText = "margin-top:8px; display:flex; gap:4px; flex-wrap:wrap;";
         const step = parseFloat(document.getElementById("jogStep").value || 5);
@@ -355,9 +482,7 @@ async function refreshJoints() {
                 const cur = await api(`/api/arm/${arm}/joints`);
                 const vals = cur.values.map(Number);
                 vals[i] += dir * step;
-                await api(`/api/arm/${arm}/move/joints`, {
-                  method: "POST", body: JSON.stringify({ values: vals })
-                });
+                await api(`/api/arm/${arm}/move/joints`, { method: "POST", body: JSON.stringify({ values: vals }) });
                 log(`${arm} jog J${i}${dir > 0 ? "+" : "−"}`);
               } catch (e) { log("jog failed: " + e.message, "err"); }
             };
@@ -375,10 +500,9 @@ async function refreshJoints() {
   }
 }
 refreshJoints();
-if (pollTimer) clearInterval(pollTimer);
-pollTimer = setInterval(refreshJoints, POLL_MS);
+setInterval(refreshJoints, POLL_MS);
 
-/* ================= gripper + arm actions ================= */
+/* ================= arm actions ================= */
 async function armAction(arm, action) {
   try {
     await api(`/api/arm/${arm}/gripper/${action}`, { method: "POST" });
@@ -386,12 +510,14 @@ async function armAction(arm, action) {
   } catch (e) { log(`${arm} gripper ${action} failed: ${e.message}`, "err"); }
 }
 
+/* Reset arm 1 */
 document.getElementById("btnResetArm1").onclick = async () => {
-  setBusy("btnResetArm1", true);
+  busy(true);
+  setBusyOverlay("busyArm1", true);
+  setStatus("arm1Status", "resetting", "busy");
   try {
     await api("/api/arm/arm/gripper/open", { method: "POST" });
     log("arm 1: opening gripper");
-    // Move to parking keyframe if we know it — fall back to reading poses
     const poses = await api("/api/poses");
     const pkf = (poses.poses.arm || []).find(k => k.name === "parking");
     if (pkf && pkf.values) {
@@ -401,40 +527,97 @@ document.getElementById("btnResetArm1").onclick = async () => {
       log("no 'parking' keyframe found in poses.json", "warn");
     }
   } catch (e) { log("reset arm 1 failed: " + e.message, "err"); }
-  finally { setBusy("btnResetArm1", false); }
+  finally { busy(false); setBusyOverlay("busyArm1", false); setStatus("arm1Status", "idle"); }
 };
 
+/* YOLO pick & place */
 document.getElementById("btnPickPlace").onclick = async () => {
-  setBusy("btnPickPlace", true);
+  busy(true);
+  setBusyOverlay("busyArm1", true);
+  setStatus("arm1Status", "pick & place", "busy");
   try {
+    speak("you look thirsty, let me get you some water.");
     await api("/api/arm/arm/gripper/open", { method: "POST" });
     log("arm 1: starting YOLO pick & place");
-    // Placeholder: full YOLO sequence needs depth + vision; expose via backend later
-    log("YOLO pick & place not yet ported to this frontend (needs depth + YOLO service)", "warn");
+    const res = await api("/api/pick_and_place", { method: "POST" });
+    log(`pick & place done: ${res.frames} frames, bottle ${res.width_mm?.toFixed(0)} mm wide`);
   } catch (e) { log("pick & place failed: " + e.message, "err"); }
-  finally { setBusy("btnPickPlace", false); }
+  finally { busy(false); setBusyOverlay("busyArm1", false); setStatus("arm1Status", "idle"); }
 };
 
+/* Arm 2 home */
 document.getElementById("btnArm2Home").onclick = async () => {
-  setBusy("btnArm2Home", true);
+  busy(true);
+  setBusyOverlay("busyArm2", true);
+  setStatus("arm2Status", "moving home", "busy");
   try {
     const poses = await api("/api/poses");
     const kf = (poses.poses.arm2 || []).find(k => k.name === "safe_bottle_start_pose");
     if (!kf) throw new Error("no 'safe_bottle_start_pose' for arm2");
     if (kf.pose) {
-      await api("/api/arm/arm2/move/position", {
-        method: "POST",
-        body: JSON.stringify(kf.pose)
-      });
+      await api("/api/arm/arm2/move/position", { method: "POST", body: JSON.stringify(kf.pose) });
     } else if (kf.values) {
-      await api("/api/arm/arm2/move/joints", {
-        method: "POST",
-        body: JSON.stringify({ values: kf.values })
-      });
+      await api("/api/arm/arm2/move/joints", { method: "POST", body: JSON.stringify({ values: kf.values }) });
     }
     log("arm 2: moved to safe_bottle_start_pose");
   } catch (e) { log("arm2 home failed: " + e.message, "err"); }
-  finally { setBusy("btnArm2Home", false); }
+  finally { busy(false); setBusyOverlay("busyArm2", false); setStatus("arm2Status", "idle"); }
+};
+
+/* Unscrew */
+document.getElementById("btnUnscrewDescribe").onclick = async () => {
+  try {
+    const d = await api("/api/unscrew/describe");
+    document.getElementById("usSteps").textContent = d.steps.join("\n  ");
+  } catch (e) { log("unscrew describe failed: " + e.message, "err"); }
+};
+
+document.getElementById("btnUnscrew").onclick = async () => {
+  const req = {
+    twists: parseInt(document.getElementById("usTwists").value) || 4,
+    twist_deg: parseFloat(document.getElementById("usTwistDeg").value) || 90,
+    release_pos: parseInt(document.getElementById("usReleasePos").value) || 500,
+    final_lift_mm: parseFloat(document.getElementById("usFinalLift").value) || 30,
+    speed_deg_s: parseFloat(document.getElementById("usSpeed").value) || 20,
+    grip_force_pct: parseInt(document.getElementById("usGripForce").value) || 50,
+    dry_run: document.getElementById("usDryRun").checked,
+  };
+  busy(true);
+  setBusyOverlay("busyUnscrew", true);
+  setStatus("arm2Status", "unscrewing", "busy");
+  document.getElementById("btnUnscrewStop").disabled = false;
+  try {
+    await api("/api/unscrew", { method: "POST", body: JSON.stringify(req) });
+    log("unscrew complete");
+  } catch (e) { log("unscrew failed: " + e.message, "err"); }
+  finally { busy(false); setBusyOverlay("busyUnscrew", false); setStatus("arm2Status", "idle"); document.getElementById("btnUnscrewStop").disabled = true; }
+};
+
+document.getElementById("btnUnscrewStop").onclick = async () => {
+  try {
+    await api("/api/unscrew/stop", { method: "POST" });
+    log("unscrew stop requested");
+  } catch (e) { log("unscrew stop failed: " + e.message, "err"); }
+};
+
+/* Full run */
+document.getElementById("btnFullRun").onclick = async () => {
+  busy(true);
+  setBusyOverlay("busyFullRun", true);
+  setStatus("arm1Status", "full run", "busy");
+  document.getElementById("btnFullRunStop").disabled = false;
+  try {
+    const res = await api("/api/full_run", { method: "POST" });
+    log(`full run complete: ${res.step}`);
+  } catch (e) { log("full run failed: " + e.message, "err"); }
+  finally { busy(false); setBusyOverlay("busyFullRun", false); setStatus("arm1Status", "idle"); document.getElementById("btnFullRunStop").disabled = true; }
+};
+
+document.getElementById("btnFullRunStop").onclick = async () => {
+  try {
+    await api("/api/full_run/stop", { method: "POST" });
+    log("full run stop requested");
+  } catch (e) { log("full run stop failed: " + e.message, "err"); }
 };
 
 /* ================= keyframes ================= */
@@ -478,21 +661,42 @@ document.getElementById("btnLoadPoses").onclick = loadPoses;
 document.getElementById("btnSaveKf").onclick = async () => {
   const name = document.getElementById("kfName").value.trim();
   if (!name) { log("give the keyframe a name", "warn"); return; }
-  // determine active arm: default to first arm
   try {
     const arms = (await api("/api/arms")).arms;
     const arm = arms[0] || "arm";
     const pos = await api(`/api/arm/${arm}/position`);
-    const payload = {
-      arm, name,
-      pose: { x: pos.x, y: pos.y, z: pos.z, o_x: pos.o_x, o_y: pos.o_y, o_z: pos.o_z, theta: pos.theta },
-      gripper: null,
-    };
+    const payload = { arm, name, pose: pos, gripper: null };
     log(`saved ${name} for ${arm} (pose keyframe)`);
     document.getElementById("kfName").value = "";
     await loadPoses();
   } catch (e) { log("save keyframe failed: " + e.message, "err"); }
 };
+
+/* ================= run sequence ================= */
+async function runSequence(kind) {
+  busy(true);
+  setBusyOverlay("busySequence", true);
+  setStatus("arm1Status", "sequence", "busy");
+  try {
+    const poses = await api("/api/poses");
+    let keyframes = [];
+    if (kind === "arm1") {
+      keyframes = (poses.poses.arm || []).map(k => ({ ...k, arm: "arm" }));
+    } else if (kind === "arm2") {
+      keyframes = (poses.poses.arm2 || []).map(k => ({ ...k, arm: "arm2" }));
+    } else {
+      keyframes = [...(poses.poses.arm || []), ...(poses.poses.arm2 || [])]
+        .map(k => ({ ...k, arm: k.arm || "arm" }));
+    }
+    await api("/api/poses/run", { method: "POST", body: JSON.stringify({ keyframes }) });
+    log(`sequence "${kind}" complete: ${keyframes.length} steps`);
+  } catch (e) { log(`sequence ${kind} failed: ${e.message}`, "err"); }
+  finally { busy(false); setBusyOverlay("busySequence", false); setStatus("arm1Status", "idle"); }
+}
+
+document.getElementById("btnRunArm1").onclick = () => runSequence("arm1");
+document.getElementById("btnRunArm2").onclick = () => runSequence("arm2");
+document.getElementById("btnRunBoth").onclick = () => runSequence("both");
 
 /* ================= camera ================= */
 async function refreshCam() {
@@ -510,16 +714,32 @@ async function refreshCam() {
     document.getElementById("camImg").style.display = "none";
   }
 }
+document.getElementById("btnCamToggle").onclick = async () => {
+  camPreviewOn = !camPreviewOn;
+  const btn = document.getElementById("btnCamToggle");
+  const badge = document.getElementById("camBadge");
+  if (camPreviewOn) {
+    btn.textContent = "⏸ stop preview";
+    btn.className = "small secondary";
+    badge.textContent = "live";
+    badge.className = "badge on";
+    refreshCam();
+    camTimer = setInterval(refreshCam, 1000);
+  } else {
+    btn.textContent = "▶ start preview";
+    btn.className = "small";
+    badge.textContent = "off";
+    badge.className = "badge";
+    clearInterval(camTimer);
+    camTimer = null;
+  }
+};
 document.getElementById("btnCamRefresh").onclick = refreshCam;
 document.getElementById("camSelect").addEventListener("change", refreshCam);
-
-// initial camera load
 setTimeout(refreshCam, 800);
 
-/* ================= poll ================= */
-setInterval(() => {
-  refreshJoints();
-}, POLL_MS);
+/* ================= init ================= */
+loadPoses();
 
 </script>
 </body>
