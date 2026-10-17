@@ -115,7 +115,17 @@
     <h2>Controls</h2>
     <div class="section">
       <button id="btnStopAll" class="stopall" style="width:100%;">🛑 STOP ALL</button>
-      <p class="disabled-hint" style="margin-top:6px; font-size:.75rem;">Stops every arm, gripper, sequence and unscrew immediately.</p>
+      <div class="setting-row" style="margin-top:8px;">
+        <label style="min-width:0;">Approach method</label>
+        <select id="approachMethod" style="width:auto; min-width:auto;">
+          <option value="taught">Taught keyframes (joint/pose)</option>
+          <option value="vision">Vision-based (YOLO + line-search)</option>
+        </select>
+      </div>
+      <p class="disabled-hint" style="margin-top:6px; font-size:.75rem;">
+        Arm 1 taught = joint keyframes · vision = YOLO pick & place.
+        Arm 2 taught = pose keyframes · vision = line-search cap.
+      </p>
     </div>
 
     <!-- ARM 1 -->
@@ -133,7 +143,8 @@
     <h2>Arm 2 <span class="badge" id="arm2Status">idle</span></h2>
     <div class="section">
       <div class="row">
-        <button id="btnArm2Home">🏠 Move arm2 home</button>
+        <button id="btnArm2Home" class="danger">🏠 Move arm2 home</button>
+        <button id="btnArm2LineSearch" class="secondary small">📏 Line-search cap</button>
       </div>
       <div class="busy-overlay" id="busyArm2"><div class="spinner"></div><div>arm 2 moving…</div></div>
       <p class="disabled-hint" id="hintArm2"></p>
@@ -736,19 +747,26 @@ async function armAction(arm, action) {
 }
 
 document.getElementById("btnResetArm1").onclick = async () => {
+  const method = document.getElementById("approachMethod").value;
   busy(true);
   setBusyOverlay("busyArm1", true);
   setStatus("arm1Status", "resetting", "busy");
   try {
     await api("/api/arm/arm/gripper/open", { method: "POST" });
     log("arm 1: opening gripper");
-    const poses = await api("/api/poses");
-    const pkf = (poses.poses.arm || []).find(k => k.name === "parking");
-    if (pkf && pkf.values) {
-      await api("/api/arm/arm/move/joints", { method: "POST", body: JSON.stringify({ values: pkf.values }) });
-      log("arm 1: moved to parking");
+    if (method === "vision") {
+      log("arm 1: vision mode — using YOLO pick & place instead of taught reset");
+      const res = await api("/api/pick_and_place", { method: "POST" });
+      log(`arm 1: YOLO pick & place done: ${res.frames} frames`);
     } else {
-      log("no 'parking' keyframe found in poses.json", "warn");
+      const poses = await api("/api/poses");
+      const pkf = (poses.poses.arm || []).find(k => k.name === "parking");
+      if (pkf && pkf.values) {
+        await api("/api/arm/arm/move/joints", { method: "POST", body: JSON.stringify({ values: pkf.values }) });
+        log("arm 1: moved to parking (taught)");
+      } else {
+        log("no 'parking' keyframe found in poses.json", "warn");
+      }
     }
   } catch (e) { log("reset arm 1 failed: " + e.message, "err"); }
   finally { busy(false); setBusyOverlay("busyArm1", false); setStatus("arm1Status", "idle"); }
@@ -770,20 +788,47 @@ document.getElementById("btnPickPlace").onclick = async () => {
 };
 
 document.getElementById("btnArm2Home").onclick = async () => {
+  const method = document.getElementById("approachMethod").value;
   busy(true);
   setBusyOverlay("busyArm2", true);
   setStatus("arm2Status", "moving home", "busy");
   try {
-    const poses = await api("/api/poses");
-    const kf = (poses.poses.arm2 || []).find(k => k.name === "safe_bottle_start_pose");
-    if (!kf) throw new Error("no 'safe_bottle_start_pose' for arm2");
-    if (kf.pose) {
-      await api("/api/arm/arm2/move/position", { method: "POST", body: JSON.stringify(kf.pose) });
-    } else if (kf.values) {
-      await api("/api/arm/arm2/move/joints", { method: "POST", body: JSON.stringify({ values: kf.values }) });
+    if (method === "vision") {
+      log("arm 2: vision mode — line-search cap instead of taught home");
+      const res = await api("/api/cap/line-search", { method: "POST", body: JSON.stringify({}) });
+      if (res.candidates && res.candidates.length > 0) {
+        const c = res.candidates[0];
+        log(`arm 2: line-search found cap at (${c.u}, ${c.v}) z ${c.z_mm.toFixed(0)} mm`);
+      } else {
+        log("arm 2: line-search found no cap candidates", "warn");
+      }
+    } else {
+      const poses = await api("/api/poses");
+      const kf = (poses.poses.arm2 || []).find(k => k.name === "safe_bottle_start_pose");
+      if (!kf) throw new Error("no 'safe_bottle_start_pose' for arm2");
+      if (kf.pose) {
+        await api("/api/arm/arm2/move/position", { method: "POST", body: JSON.stringify(kf.pose) });
+      } else if (kf.values) {
+        await api("/api/arm/arm2/move/joints", { method: "POST", body: JSON.stringify({ values: kf.values }) });
+      }
+      log("arm 2: moved to safe_bottle_start_pose (taught)");
     }
-    log("arm 2: moved to safe_bottle_start_pose");
   } catch (e) { log("arm2 home failed: " + e.message, "err"); }
+  finally { busy(false); setBusyOverlay("busyArm2", false); setStatus("arm2Status", "idle"); }
+};
+
+document.getElementById("btnArm2LineSearch").onclick = async () => {
+  busy(true);
+  setBusyOverlay("busyArm2", true);
+  setStatus("arm2Status", "line-searching", "busy");
+  try {
+    const res = await api("/api/cap/line-search", { method: "POST", body: JSON.stringify({}) });
+    document.getElementById("lsResult").innerHTML = `
+      <div class="metric">Line-search candidates: <span class="val">${res.candidates?.length || 0}</span></div>
+      ${res.candidates && res.candidates.length > 0 ? `<div class="metric ok">Best: (${res.candidates[0].u}, ${res.candidates[0].v}) r ${res.candidates[0].r} px · z ${res.candidates[0].z_mm.toFixed(0)} mm</div>` : ''}
+    `;
+    log(`arm 2: line-search cap: ${res.candidates?.length || 0} candidates`);
+  } catch (e) { log("arm 2 line-search failed: " + e.message, "err"); }
   finally { busy(false); setBusyOverlay("busyArm2", false); setStatus("arm2Status", "idle"); }
 };
 
