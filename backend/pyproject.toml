@@ -9,6 +9,10 @@ dependencies = [
     "viam-sdk>=0.84.0",
     "opencv-python-headless>=5.0.0",
     "numpy>=2.2.6",
+    # Optional OCR for reading the 'S' on the cap. Install tesseract separately
+    # (brew install tesseract) if you want text recognition; template matching
+    # works without it for just the letter 'S'.
+    "pytesseract>=0.3.13",
 ]
 
 [dependency-groups]

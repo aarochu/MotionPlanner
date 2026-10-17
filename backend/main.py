@@ -39,6 +39,8 @@ def _get_robot():
 from yolo_grab import (DEFAULTS as YOLO_DEFAULTS, pick_and_place as yg_pick_and_place, reset_arm as yg_reset_arm, measure as yg_measure, plan as yg_plan, level_target as yg_level_target, yaw_target as yg_yaw_target, _unit, _straight)
 from cap_unscrew import UnscrewParams, Unscrewer, describe as unscrew_describe
 from bottle_task import BottleTask, go_to_keyframe as bt_go_to_keyframe, apply_gripper as bt_apply_gripper
+from cap_line_search import (line_search_cap, detect_s_template, size_to_distance,
+                             _render_letter_template, _HAS_TESSERACT)
 
 # Load poses_io from the repo root without adding it to sys.path (avoids shadowing backend modules).
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -143,6 +145,13 @@ class AlignPlan(BaseModel):
     circle_r: float
     hover: float = 80.0
     keep_height: bool = True
+
+
+class LineSearchRequest(BaseModel):
+    cap_d_mm: float = 34.0
+    search_range_px: int = 200
+    step_px: int = 10
+    use_ocr: bool = False
 
 
 class Keyframe(BaseModel):
@@ -666,6 +675,90 @@ def api_cap_detect(req: CapDetect | None = None) -> dict[str, Any]:
         ok, enc = cv2.imencode(".jpg", img)
         result["jpeg_base64"] = base64.b64encode(enc.tobytes()).decode("ascii") if ok else None
         return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Cap detection: line-search (alternative to Hough circles)
+# ---------------------------------------------------------------------------
+@app.post("/api/cap/line-search")
+def api_cap_line_search(req: LineSearchRequest | None = None) -> dict[str, Any]:
+    """Line-search cap detection: walk down the bottle axis looking for the cap.
+
+    Uses known bottle geometry to collapse the 2D circle search into a 1D line
+    search. Optionally template-matches / OCRs for the 'S' on the cap.
+    """
+    try:
+        import cv2
+        from robot import capture_frame
+        cap = capture_frame("cam2", "cam2", "arm2")
+        bgr = cap["bgr"]
+        depth = cap["depth"]
+        i = cap["intrinsics"] if "intrinsics" in cap else None
+
+        # Build a minimal intrinsics object from camera capture
+        class _Intr:
+            def __init__(self, cap_dict):
+                self.focal_x_px = float(cap_dict.get("fx", 600.0))
+                self.focal_y_px = float(cap_dict.get("fy", 600.0))
+                self.center_x_px = float(cap_dict.get("cx", cap["bgr"].shape[1] / 2))
+                self.center_y_px = float(cap_dict.get("cy", cap["bgr"].shape[0] / 2))
+
+        intrinsics = _Intr(cap)
+
+        # Use image center as approx bottle center, axis pointing down in image
+        h, w = bgr.shape[:2]
+        bottle_center_px = (w / 2, h / 2)
+        axis_dir_px = (0.0, 1.0)
+
+        template = _render_letter_template('S')
+        candidates = line_search_cap(
+            bgr, depth, intrinsics, bottle_center_px, axis_dir_px,
+            cap_d_mm=req.cap_d_mm if req else 34.0,
+            search_range_px=req.search_range_px if req else 200,
+            step_px=req.step_px if req else 10,
+            use_ocr=req.use_ocr if req else False,
+            template=template,
+        )
+
+        result = {
+            "candidates": [],
+            "has_ocr": _HAS_TESSERACT,
+        }
+        for c in candidates:
+            result["candidates"].append({
+                "u": round(c.u, 1), "v": round(c.v, 1), "r": round(c.r, 1),
+                "x_mm": round(c.x_mm, 1), "y_mm": round(c.y_mm, 1), "z_mm": round(c.z_mm, 1),
+                "score": round(c.score, 3),
+                "has_s": c.has_s,
+                "s_confidence": round(c.s_confidence, 3),
+            })
+
+        # Annotate image with detections
+        for c in candidates[:5]:
+            color = (0, 255, 0) if c.has_s else (0, 200, 255)
+            cv2.circle(bgr, (int(c.u), int(c.v)), int(c.r), color, 3)
+            cv2.circle(bgr, (int(c.u), int(c.v)), 4, color, -1)
+            label = f"S:{c.s_confidence:.2f}" if c.has_s else f"{c.score:.2f}"
+            cv2.putText(bgr, label, (int(c.u) + 5, int(c.v) - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        ok, enc = cv2.imencode(".jpg", bgr)
+        result["jpeg_base64"] = base64.b64encode(enc.tobytes()).decode("ascii") if ok else None
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/cap/line-search/template")
+def api_cap_line_search_template() -> dict[str, Any]:
+    """Return the 'S' template image used for template matching."""
+    try:
+        import cv2
+        import base64
+        template = _render_letter_template('S')
+        ok, enc = cv2.imencode(".jpg", template)
+        return {"jpeg_base64": base64.b64encode(enc.tobytes()).decode("ascii") if ok else None}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
