@@ -3,6 +3,7 @@
 Config comes from environment variables (see env.sh / run.sh); nothing secret is stored in code.
 """
 import asyncio
+import functools
 import json
 import os
 import threading
@@ -12,13 +13,13 @@ from pathlib import Path
 import cv2
 import numpy as np
 import streamlit as st
-import bottle_task
 import poses_io
 import vision as V
 import yolo_grab as YG
-from bottle_task import POSE_KEYS, BottleTask
+from bottle_task import POSE_KEYS, BottleTask, Mover
 from cap_unscrew import UnscrewParams, Unscrewer, describe
 from cap_vision import circle_features, detect_circles  # cap test judged against the table's brightness
+from kinematics import ov_to_matrix
 from viam.components.arm import Arm, JointPositions
 from viam.components.camera import Camera
 from viam.components.gripper import Gripper
@@ -51,7 +52,8 @@ GRAB_REF_FILE = Path(os.environ.get("GRAB_REF_FILE", "grab_reference.json"))
 SCAN_KEYFRAME, GRAB_KEYFRAME = "NewMid", "grab_pos"
 MAX_GRAB_FIX_MM = 30.0   # bigger misplacement aborts instead of chasing the bottle
 PRE_GRAB_MM = 60.0       # pre-grab point this far back along the gripper's approach direction
-AT_POSE_TOL_DEG = 1.0    # how close (every joint) the arm must be to a keyframe to count as "at" it
+AT_POSE_TOL_DEG = 1.0    # how close (every joint, or the tool orientation) the arm must be to a keyframe to count as "at" it
+AT_POSE_TOL_MM = 2.0     # and for an XYZ keyframe, how close the end position must be
 # Coarse first look from PARK_KEYFRAME: confirms the bottle is there and roughly where before the arm leaves,
 # then the fine scan at SCAN_KEYFRAME must agree with it.
 PARK_KEYFRAME = "parking"
@@ -64,7 +66,7 @@ UNSCREW_START_POSE = "open_bottle_cap_pose"  # arm2 keyframe the unscrew sequenc
 TRASH_DROP_POSE = "trash_drop_pose"  # full run ends here (cap dropped); not part of its keyframe phase
 RETREAT_POSE = "open_bottle_cap_up_pose"  # full run: after unscrewing, rise to this pose's height before the drop
 VIA_POSES = ["safe_bottle_start_pose"]  # full run: then pass through these (move only, cap held) on the way to the drop
-ALONGSIDE_POSE = "safe_bottle_start_pose"  # full run: arm2 moves here together with arm's first keyframe; arm waits for it
+ARM2_FIRST_POSE = "safe_bottle_start_pose"  # full run: arm2 moves here first (out of arm's way), then arm's sequence
 
 st.set_page_config(page_title="Arm Keyframes", page_icon="🦾", layout="wide")
 
@@ -107,6 +109,14 @@ run, ROBOT, ARMS, GRIPPERS, CAM_RIGS = get_robot()
 
 
 @st.cache_resource
+def get_mover():
+    return Mover(run, ROBOT, ARMS)
+
+
+MOVER = get_mover()  # keyframe, corrected-grab and Align moves: motion service, collision-checked
+
+
+@st.cache_resource
 def get_unscrewer():
     if "arm2" not in ARMS or "arm2" not in GRIPPERS:
         return None
@@ -118,7 +128,7 @@ UNSCREWER = get_unscrewer()
 
 @st.cache_resource
 def get_bottle_task():
-    return BottleTask(run, ARMS, GRIPPERS, UNSCREWER) if UNSCREWER is not None else None
+    return BottleTask(run, ARMS, GRIPPERS, UNSCREWER, MOVER) if UNSCREWER is not None else None
 
 
 BOTTLE_TASK = get_bottle_task()
@@ -165,7 +175,7 @@ def check_action_stop():
 
 def go_to_keyframe(p):
     check_action_stop()
-    bottle_task.go_to_keyframe(run, ARMS[p["arm"]], p)  # joints: joint move; pose: motion planner
+    MOVER.go(p)  # motion planner, collision-checked; a joint keyframe is converted to its end pose first
 
 
 def keyframe_text(p):
@@ -508,7 +518,7 @@ def confirm_align(settings):
     if st.session_state.get("align_yes") and "align_plan" in st.session_state:
         # "Yes, move" reruns this dialog: execute the plan that was shown, not a fresh detection
         with st.spinner("Moving…"):
-            ok = safely(lambda: run(ARMS[CAM_ARM].move_to_position(st.session_state.pop("align_plan")["target"])))
+            ok = safely(lambda: MOVER.to_pose(CAM_ARM, st.session_state.pop("align_plan")["target"]))
         if ok:
             st.rerun()
         return
@@ -548,14 +558,18 @@ def confirm_align(settings):
 
 
 def at_keyframe(name, arm_name="arm"):
-    """(is the arm at this keyframe?, largest joint difference in degrees, the keyframe or None)."""
+    """(is the arm at this keyframe?, how far off as text, the keyframe or None)."""
     kf = next((p for p in load_poses() if p["name"] == name and p.get("arm", "arm") == arm_name), None)
     if kf is None:
         return False, None, None
-    if "values" not in kf:  # an XYZ keyframe: this check compares joint angles
-        return False, None, kf
-    diff = max(abs(a - b) for a, b in zip(joints(arm_name), kf["values"]))
-    return diff <= AT_POSE_TOL_DEG, diff, kf
+    if "values" in kf:
+        diff = max(abs(a - b) for a, b in zip(joints(arm_name), kf["values"]))
+        return diff <= AT_POSE_TOL_DEG, f"{diff:.1f}°", kf
+    e, q = run(ARMS[arm_name].get_end_position()), kf["pose"]
+    mm = float(np.linalg.norm([e.x - q["x"], e.y - q["y"], e.z - q["z"]]))
+    r = ov_to_matrix(e.o_x, e.o_y, e.o_z, e.theta).T @ ov_to_matrix(q["o_x"], q["o_y"], q["o_z"], q["theta"])
+    deg = float(np.degrees(np.arccos(np.clip((np.trace(r) - 1) / 2, -1, 1))))
+    return mm <= AT_POSE_TOL_MM and deg <= AT_POSE_TOL_DEG, f"{mm:.1f} mm, {deg:.1f}°", kf
 
 
 def pose_dict(p):
@@ -975,16 +989,12 @@ if UNSCREWER is not None:
 
 # ---------- full run (bottle_task.py): arm's sequence, arm2's keyframes -> unscrew -> trash drop ----------
 @st.dialog("Full run", width="large")
-def confirm_full_run(keyframes, params, drop, retreat, via, alongside):
+def confirm_full_run(keyframes, params, drop, retreat, via):
     st.write("Run all three phases, one after another?")
-    st.markdown("**1. Keyframes** (all of arm's, then arm2's)")
-    for n, kf in enumerate(keyframes):
+    st.markdown("**1. Keyframes**, one arm at a time, each move planned around obstacles and the other arm")
+    for kf in keyframes:
         st.markdown(f"- {kf['arm']} → **{kf['name']}**" + (f", then gripper {kf['gripper']}" if kf.get("gripper") else "")
                     + (f", wait {kf['delay']:g} s" if kf.get("delay") else ""))
-        if n == 0 and alongside is not None:
-            st.markdown(f"  - **starting at the same time:** {alongside['arm']} → **{alongside['name']}**"
-                        + (f", then gripper {alongside['gripper']}" if alongside.get("gripper") else "")
-                        + f" — {kf['arm']} waits at {kf['name']} until {alongside['arm']} has arrived, then continues")
     st.markdown(f"**2. Unscrew** (arm2, settings from the Unscrew panel)")
     for line in describe(params):
         st.markdown(f"- {line}")
@@ -1000,7 +1010,7 @@ def confirm_full_run(keyframes, params, drop, retreat, via, alongside):
     st.caption("arm's sequence must end holding the bottle (its last keyframe has no gripper action). Keep the "
                "e-stop in reach; STOP ALL or Stop halts every phase.")
     if st.button("Yes, run all", type="primary"):
-        if safely(BOTTLE_TASK.start, keyframes, params, drop, retreat, via, alongside):
+        if safely(BOTTLE_TASK.start, keyframes, params, drop, retreat, via):
             st.rerun()
 
 
@@ -1010,12 +1020,10 @@ if BOTTLE_TASK is not None:
     all_kf = load_poses()
     drop_kf = next((k for k in all_kf if k["name"] == TRASH_DROP_POSE), None)
     pre_kf = [k for k in poses_io.sequence(all_kf, "arm_then_arm2") if k["name"] != TRASH_DROP_POSE]
-    # arm2 goes to its start pose while arm does its first keyframe, then skips it in its own part
-    alongside_kf = next((k for k in pre_kf if k["arm"] == "arm2" and k["name"] == ALONGSIDE_POSE), None)
-    if alongside_kf is not None and pre_kf and pre_kf[0]["arm"] != "arm2":
-        pre_kf = [k for k in pre_kf if k is not alongside_kf]
-    else:
-        alongside_kf = None
+    # arm2 goes to its start pose first (out of arm's way), then arm's sequence, then the rest of arm2's
+    first_kf = next((k for k in pre_kf if k["arm"] == "arm2" and k["name"] == ARM2_FIRST_POSE), None)
+    if first_kf is not None:
+        pre_kf = [first_kf] + [k for k in pre_kf if k is not first_kf]
     retreat_kf = next((k for k in all_kf if k["name"] == RETREAT_POSE), None)
     via_kf = [k for name in VIA_POSES for k in all_kf if k["name"] == name]
     with st.container(border=True):
@@ -1023,7 +1031,7 @@ if BOTTLE_TASK is not None:
             st.warning(f"Save a keyframe named `{TRASH_DROP_POSE}` (where the cap is dropped) to enable the full run.")
         else:
             st.caption(f"1. Keyframes: {' → '.join(k['name'] for k in pre_kf) or '(none)'}"
-                       + (f" (arm2 → {alongside_kf['name']} starts together with {pre_kf[0]['name']})" if alongside_kf else "") + " · "
+                       + " · "
                        f"2. Unscrew with the settings above (start **{params.start_pose or 'current pose'}**, "
                        f"{'dry run' if params.dry_run else 'real cap'}) · "
                        + (f"3. straight up to **{RETREAT_POSE}**'s height holding the cap, then " if retreat_kf else "3. ")
@@ -1032,7 +1040,7 @@ if BOTTLE_TASK is not None:
         f1, f2, _ = st.columns([1, 1, 2])
         if f1.button("▶ Full run", type="primary", use_container_width=True,
                      disabled=drop_kf is None or busy or FULL_RUNNING):
-            confirm_full_run(pre_kf, params, drop_kf, retreat_kf, via_kf, alongside_kf)
+            confirm_full_run(pre_kf, params, drop_kf, retreat_kf, via_kf)
         if f2.button("⏹ Stop full run", use_container_width=True, disabled=not FULL_RUNNING):
             BOTTLE_TASK.stop()
             st.rerun()
@@ -1133,6 +1141,18 @@ TAB_FULL.__exit__(None, None, None)
 
 
 # ---------- Simple tab: reset arm 1, and the YOLO pick & place (yolo_grab.reset_arm / pick_and_place) ----------
+def plan_arm1_joints(q):
+    """yolo_grab's moves to parking / NewMid / above the place spot: the end pose those joints give, reached through
+    the motion planner (collision-checked), like every keyframe move."""
+    MOVER.go({"arm": "arm", "name": "yolo", "values": list(q)})
+
+
+def smooth_arm1(goal):
+    """yolo_grab's straight moves (reset back-out and rise, approach, grab, lift, set-down): one continuous planned
+    straight-line move instead of short stop-and-go steps."""
+    MOVER.to_pose("arm", goal, linear=(5.0, 5.0))
+
+
 def arm1_keyframe(name):
     kf = next((p for p in load_poses() if p["arm"] == "arm" and p["name"] == name and "values" in p), None)
     return kf["values"] if kf else None
@@ -1166,7 +1186,8 @@ def confirm_reset_arm1():
              f"along the gripper, rise to z {YG.RESET_CLEAR_Z:.0f} mm if lower, then move to **parking**.")
     st.caption("Lets go of anything arm 1 holds. Arm 2 is not moved. Keep the e-stop in reach.")
     if st.session_state.get("reset1_yes"):
-        run_logged("Reset arm 1", YG.reset_arm, rpc, ARMS["arm"], GRIPPERS["arm"], parking)
+        run_logged("Reset arm 1", functools.partial(YG.reset_arm, move_joints=plan_arm1_joints, smooth=smooth_arm1),
+                   rpc, ARMS["arm"], GRIPPERS["arm"], parking)
         st.rerun()
     st.button("Yes, reset arm 1", type="primary", key="reset1_yes")
 
@@ -1179,7 +1200,9 @@ def confirm_pick_place():
         return
     cfg = dict(YG.DEFAULTS)
     st.markdown(
-        "1. Open the gripper and go to **NewMid** (arm 1 must start at parking or NewMid).\n"
+        "1. If arm 1 is not at parking or NewMid, reset it first: open the gripper, back straight out "
+        f"{YG.RESET_RETREAT_MM:.0f} mm, rise to z {YG.RESET_CLEAR_Z:.0f} mm, go to **parking**. Then open the gripper "
+        "and go to **NewMid**.\n"
         f"2. YOLO + depth locate the leftmost bottle ({int(cfg['frames'])} frames). If it is not fully in view, back up "
         f"{cfg['backup_mm']:.0f} mm in x and look again (up to {int(cfg['max_backups'])} times); any failed check "
         "stops here.\n"
@@ -1191,7 +1214,8 @@ def confirm_pick_place():
                f"bottle axis. Table at z {YG.TABLE_Z:+.1f} mm. Only arm 1 moves: make sure arm 2 is clear of the place "
                "spot. STOP ALL stops between steps; keep the e-stop in reach.")
     if st.session_state.get("pickplace_yes"):
-        result = run_logged("YOLO pick & place", YG.pick_and_place, run, rpc, ROBOT, ARMS["arm"], GRIPPERS["arm"],
+        result = run_logged("YOLO pick & place", functools.partial(YG.pick_and_place, move_joints=plan_arm1_joints, reset_first=True, smooth=smooth_arm1),
+                            run, rpc, ROBOT, ARMS["arm"], GRIPPERS["arm"],
                             CAM_RIGS["arm"][0], RIGS["arm"][0], RIGS["arm"][1], newmid, parking, cfg)
         if result:
             st.session_state.update(yg_meas=result[0], yg_plan=result[1], yg_cfg_used=cfg)

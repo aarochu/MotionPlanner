@@ -471,7 +471,17 @@ def _pose(e):
     return {k: float(getattr(e, k)) for k in POSE_KEYS}
 
 
-def _straight(rpc, arm, goal, step_mm, check):
+def _straight(rpc, arm, goal, step_mm, check, smooth=None):
+    """Straight move to goal. With smooth (the dashboard passes a single planned straight-line move) it is one
+    continuous motion; if no single straight path is found, or without smooth, it goes in step_mm steps."""
+    if smooth is not None:
+        check()
+        try:
+            smooth(goal)
+            return
+        except Exception as e:
+            if "no direct solutions" not in str(e) and "failed to find path" not in str(e):
+                raise
     for w in steps(_pose(rpc(arm.get_end_position)), goal, step_mm):
         check()
         rpc(arm.move_to_position, Pose(**w))
@@ -481,7 +491,16 @@ def _near(q, ref, tol=AT_KEYFRAME_DEG):
     return ref is not None and max(abs(a - b) for a, b in zip(q, ref)) <= tol
 
 
-def reset_arm(rpc, arm, gripper, parking, check=lambda: None, log=print):
+def _to_joints(rpc, arm, q, move_joints):
+    """Go to joint angles q: through move_joints(q) when given (the dashboard plans it with the motion service,
+    collision-checked), else a direct joint move."""
+    if move_joints is not None:
+        move_joints(list(q))
+    else:
+        rpc(arm.move_to_joint_positions, JointPositions(values=list(q)))
+
+
+def reset_arm(rpc, arm, gripper, parking, check=lambda: None, log=print, move_joints=None, smooth=None):
     """Open the gripper; unless already at parking: back straight out along the gripper, rise to RESET_CLEAR_Z,
     then a joint move to parking. The retreat and rise keep the fingers off a bottle they just let go of."""
     log("Opening the gripper")
@@ -495,14 +514,14 @@ def reset_arm(rpc, arm, gripper, parking, check=lambda: None, log=print):
     if np.linalg.norm(a_h) > 0.5:              # gripper roughly horizontal: back out along it
         d = -RESET_RETREAT_MM * _unit(a_h)
         log(f"Backing straight out {RESET_RETREAT_MM:.0f} mm")
-        _straight(rpc, arm, dict(e, x=e["x"] + d[0], y=e["y"] + d[1]), 20.0, check)
+        _straight(rpc, arm, dict(e, x=e["x"] + d[0], y=e["y"] + d[1]), 20.0, check, smooth)
     e = _pose(rpc(arm.get_end_position))
     if e["z"] < RESET_CLEAR_Z:
         log(f"Rising to z {RESET_CLEAR_Z:.0f} mm")
-        _straight(rpc, arm, dict(e, z=RESET_CLEAR_Z), 40.0, check)
+        _straight(rpc, arm, dict(e, z=RESET_CLEAR_Z), 40.0, check, smooth)
     check()
     log("Moving to parking")
-    rpc(arm.move_to_joint_positions, JointPositions(values=list(parking)))
+    _to_joints(rpc, arm, parking, move_joints)
 
 
 def locate(run, rpc, robot, arm, cam, cam_frame, grip_frame, cfg, check=lambda: None, log=print):
@@ -534,20 +553,24 @@ def locate(run, rpc, robot, arm, cam, cam_frame, grip_frame, cfg, check=lambda: 
 
 
 def pick_and_place(run, rpc, robot, arm, gripper, cam, cam_frame, grip_frame, newmid, parking, cfg,
-                   check=lambda: None, log=print):
+                   check=lambda: None, log=print, move_joints=None, reset_first=False, smooth=None):
     """From parking or NewMid: NewMid -> YOLO locate (backing up in -x if the bottle is cut off) -> level pre-grasp -> straight in -> grab -> lift ->
     above the place spot -> straight down to a set-down height computed from the measured bottle. Ends holding the
     bottle (arm 1 steadies it for arm2). Returns (measurement, plan). Raises ValueError with a plain reason and
     leaves the arm somewhere safe when a check fails."""
     q = list(rpc(arm.get_joint_positions).values)
     if not (_near(q, newmid) or _near(q, parking)):
-        raise ValueError("Arm 1 must start at parking or NewMid. Press Reset arm 1 first.")
+        if not reset_first:
+            raise ValueError("Arm 1 must start at parking or NewMid. Press Reset arm 1 first.")
+        log("Not at parking or NewMid: resetting first (open gripper, back out, rise, parking)")
+        reset_arm(rpc, arm, gripper, parking, check, log, move_joints, smooth)
+        q = list(rpc(arm.get_joint_positions).values)
     log("Opening the gripper")
     rpc(gripper.open)
     if not _near(q, newmid):
         check()
         log("Moving to NewMid")
-        rpc(arm.move_to_joint_positions, JointPositions(values=list(newmid)))
+        _to_joints(rpc, arm, newmid, move_joints)
     m = locate(run, rpc, robot, arm, cam, cam_frame, grip_frame, cfg, check, log)
     p = plan(m, cfg)
     for level, text in p["checks"]:
@@ -556,27 +579,27 @@ def pick_and_place(run, rpc, robot, arm, gripper, cam, cam_frame, grip_frame, ne
         if level == "warn":
             log("Note: " + text)
     log(f"Bottle at x {p['A'][0]:.0f}, y {p['A'][1]:.0f} (grasp z {p['zg']:.0f}); moving to the pre-grasp")
-    _straight(rpc, arm, p["pre"], cfg["pre_step_mm"], check)
+    _straight(rpc, arm, p["pre"], cfg["pre_step_mm"], check, smooth)
     log(f"Going straight in {cfg['pre_mm']:.0f} mm")
-    _straight(rpc, arm, p["grab"], cfg["in_step_mm"], check)
+    _straight(rpc, arm, p["grab"], cfg["in_step_mm"], check, smooth)
     check()
     log("Grabbing")
     if not rpc(gripper.grab):
         rpc(gripper.open)
-        _straight(rpc, arm, p["pre"], cfg["in_step_mm"], check)
+        _straight(rpc, arm, p["pre"], cfg["in_step_mm"], check, smooth)
         raise ValueError("The gripper closed on nothing; opened and backed out to the pre-grasp.")
     e = _pose(rpc(arm.get_end_position))
     log(f"Lifting {LIFT_MM:.0f} mm")
-    _straight(rpc, arm, dict(e, z=e["z"] + LIFT_MM), 20.0, check)
+    _straight(rpc, arm, dict(e, z=e["z"] + LIFT_MM), 20.0, check, smooth)
     check()
     log("Carrying to above the place spot")
-    rpc(arm.move_to_joint_positions, JointPositions(values=list(PLACE_ABOVE_JOINTS)))
+    _to_joints(rpc, arm, PLACE_ABOVE_JOINTS, move_joints)
     # Level gripper: the arm end is at pad height, and the pads sit (grasp height - bottom) above the bottle's bottom.
     e = _pose(rpc(arm.get_end_position))
     above_bottom = float(p["zg"] - m["bottom"][2])
     place_z = min(max(TABLE_Z + above_bottom, TABLE_Z + 40.0), e["z"])
     log(f"Setting down: pads {above_bottom:.0f} mm above the bottle's bottom, so arm end to z {place_z:.0f}")
-    _straight(rpc, arm, dict(e, z=min(place_z + SETDOWN_SLOW_MM, e["z"])), 20.0, check)
-    _straight(rpc, arm, dict(e, z=place_z), 5.0, check)
+    _straight(rpc, arm, dict(e, z=min(place_z + SETDOWN_SLOW_MM, e["z"])), 20.0, check, smooth)
+    _straight(rpc, arm, dict(e, z=place_z), 5.0, check, smooth)
     log("Placed. Arm 1 is holding the bottle at the place spot.")
     return m, p
