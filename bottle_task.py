@@ -3,8 +3,10 @@
 Runs in a background thread so the dashboard stays responsive and Stop / STOP ALL can interrupt it. Each phase
 waits for the previous one to finish; if any step fails or is stopped, the arms are stopped and the run ends there.
 """
+import asyncio
 import threading
 
+from viam.components.arm import JointPositions
 from viam.proto.common import Pose, PoseInFrame
 from viam.proto.service.motion import Constraints, LinearConstraint
 from viam.services.motion import MotionClient
@@ -12,6 +14,9 @@ from viam.services.motion import MotionClient
 from kinematics import Kinematics
 
 POSE_KEYS = ("x", "y", "z", "o_x", "o_y", "o_z", "theta")
+WRIST = 5                      # Joint 5: wrist twist
+JOINT_MOVE_TOL_DEG = 2.0       # a "joint_move" keyframe may only differ from where the arm is at the wrist
+WAVE_KEYFRAMES = ("right1", "left1", "right2", "left2")   # arm's wrist-wave intro, turned in this order
 
 
 class Mover:
@@ -56,7 +61,146 @@ class Mover:
             self.run(self.motion.move(component_name=arm_name, destination=dest, constraints=constraints))
 
     def go(self, kf):
-        self.to_pose(kf["arm"], self.target(kf))
+        if kf.get("joint_move"):
+            self.joints_to(kf)
+        else:
+            self.to_pose(kf["arm"], self.target(kf))
+
+    def joints_to(self, kf):
+        """A wrist-only keyframe (e.g. the wave), as a direct joint move instead of a planned one. A joint move
+        turns each joint straight from its current angle to the target, so the wrist always turns the way the
+        keyframe says (+ or -), where the planner could pick either way round. Refused unless joints 0-4 already
+        match: the arm never swings through space unchecked, only the wrist turns in place."""
+        arm = self.arms[kf["arm"]]
+        target = [float(v) for v in kf["values"]]
+        now = list(self.run(arm.get_joint_positions()).values)
+        off = max(abs(a - b) for a, b in zip(now[:WRIST], target[:WRIST]))
+        if off > JOINT_MOVE_TOL_DEG:
+            raise ValueError(f"'{kf['name']}' only turns the wrist, so {kf['arm']} must already be at the matching "
+                             f"pose (joints 0-4 are {off:.1f}° away, limit {JOINT_MOVE_TOL_DEG:g}°). "
+                             "Play the keyframe before it first.")
+        with self._lock:
+            self.run(arm.move_to_joint_positions(JointPositions(values=target)))
+
+
+def wave_offsets(poses, arm="arm", base="parking", wave=WAVE_KEYFRAMES):
+    """The wave's wrist turns (degrees, + / -) relative to `base`, read from arm's keyframes, so every wave uses the
+    same angles as Aaron's taught right1/left1/right2/left2."""
+    kf = {p["name"]: p for p in poses if p.get("arm", "arm") == arm and "values" in p}
+    missing = [n for n in (base, *wave) if n not in kf]
+    if missing:
+        raise ValueError(f"{arm} needs joint keyframes named {', '.join(missing)} for the wave.")
+    b = kf[base]["values"]
+    out = []
+    for n in wave:
+        v = kf[n]["values"]
+        if max(abs(x - y) for x, y in zip(v[:WRIST], b[:WRIST])) > JOINT_MOVE_TOL_DEG:
+            raise ValueError(f"'{n}' must differ from '{base}' only at the wrist (Joint {WRIST}).")
+        out.append(float(v[WRIST] - b[WRIST]))
+    return out
+
+
+MIRROR_SIGNS = (-1, 1, 1, -1, 1, -1)   # xArm6: yaw and roll joints flip, the bending joints stay
+
+
+def mirror_joints(values):
+    """Joint angles for the mirror image of a pose across the plane halfway between the two arms. The arms' bases
+    face the same way, so mirroring flips the joints that twist about vertical or along the arm (0, 3, 5) and keeps
+    the bending ones (1, 2, 4). This also mirrors the wrist camera, right side up (within about 3 degrees: the camera
+    mount itself is not mirrored). Mirroring arm's parking puts arm2 in the matching spot, facing the middle."""
+    return [sign * float(v) for sign, v in zip(MIRROR_SIGNS, values)]
+
+
+def half_turn(values):
+    """The same pose with the final wrist turned half a turn (J5 +/- 180, whichever stays nearer zero): the two-finger
+    gripper looks the same, but the wrist camera is on the other side. For arm2's mirrored pose the camera-upright
+    version is refused by the motion planner (its model puts cam2 inside arm2's wrist_link), so arm2 is planned to
+    this and then turns only its wrist into place."""
+    v = [float(x) for x in values]
+    j = v[WRIST] + 180.0 if v[WRIST] < 0 else v[WRIST] - 180.0
+    return v[:WRIST] + [j] + v[WRIST + 1:]
+
+
+def startup_waves(offsets, names=WAVE_KEYFRAMES):
+    """Each arm's wave for Simultaneous Start Up: arm turns right1, left1, right2, left2 as taught; arm2 does the same
+    turns in reverse order, left first (left1, right1, left2, right2), so the two mirror each other."""
+    arm1 = list(zip(names, offsets))
+    return {"arm": arm1, "arm2": [arm1[i] for i in (1, 0, 3, 2)]}
+
+
+def simultaneous_startup(run, arms, grippers, mover, starts, waves, finish=None,
+                         check=lambda: None, log=print):
+    """Simultaneous Start Up.
+
+    starts: {arm name: keyframe} where each arm does its wave, reached one at a time through the motion planner in
+    the order given. waves: {arm name: [(label, wrist offset in degrees from that start), ...]}, the same number of
+    turns per arm: turn i runs on every arm at the same time, as joint moves (fixed direction). Then every wrist goes
+    back to its start, and every gripper closes and opens together. finish: {arm name: keyframe} each of those arms
+    moves to afterwards (planned, one at a time); arms not in it stay at their start. Stops all arms on any error."""
+    order = list(starts)
+    finish = finish or {}
+    turns = {len(waves[n]) for n in order}
+    if len(turns) != 1:
+        raise ValueError("Every arm needs the same number of wave turns.")
+
+    async def together(coros):
+        await asyncio.gather(*coros)
+
+    try:
+        for n in order:
+            check()
+            kf = starts[n]
+            target = kf.get("values")
+            now = [float(v) for v in run(arms[n].get_joint_positions()).values]
+            if target is not None and max(abs(a - b) for a, b in zip(now, target)) <= JOINT_MOVE_TOL_DEG:
+                log(f"{n} is already at its wave start, {kf['name']}")
+                continue
+            if target is not None and max(abs(a - b) for a, b in zip(now[:WRIST], target[:WRIST])) > JOINT_MOVE_TOL_DEG:
+                approach = kf.get("approach_values")
+                via = dict(kf, values=approach, name=f"{kf['name']} (wrist half a turn round)") if approach else kf
+                log(f"Moving {n} to {via['name']} (motion planner, collision-checked)")
+                mover.go(via)
+                now = [float(v) for v in run(arms[n].get_joint_positions()).values]
+            if target is not None:
+                if max(abs(a - b) for a, b in zip(now, target)) > JOINT_MOVE_TOL_DEG:
+                    log(f"Turning {n}'s wrist to its wave start, {kf['name']} "
+                        f"({now[WRIST]:+.1f}° to {target[WRIST]:+.1f}°, joint move, wrist only)")
+                    mover.joints_to(dict(kf, joint_move=True))
+            else:
+                log(f"Moving {n} to its wave start, {kf['name']} (motion planner, collision-checked)")
+                mover.go(kf)
+        base = {n: [float(v) for v in run(arms[n].get_joint_positions()).values] for n in order}
+
+        def wrists(offsets, text):
+            check()
+            log(text)
+            run(together([arms[n].move_to_joint_positions(JointPositions(
+                values=base[n][:WRIST] + [base[n][WRIST] + offsets[n]] + base[n][WRIST + 1:])) for n in order]))
+
+        for i in range(turns.pop()):
+            step = {n: waves[n][i][1] for n in order}
+            what = ", ".join(f"{n} {waves[n][i][0]} {waves[n][i][1]:+.1f}°" for n in order)
+            wrists(step, f"Wave {i + 1}: {what}, together")
+        wrists({n: 0.0 for n in order}, "Every wrist back to its wave start, together")
+        check()
+        log("Closing every gripper, together")
+        run(together([grippers[n].grab() for n in order]))
+        check()
+        log("Opening every gripper, together")
+        run(together([grippers[n].open() for n in order]))
+        for n in finish:
+            check()
+            log(f"Moving {n} to {finish[n]['name']} (motion planner, collision-checked)")
+            mover.go(finish[n])
+        log("Start up done: " + ", ".join(f"{n} at {finish[n]['name'] if n in finish else starts[n]['name']}"
+                                          for n in order) + ". Ready for the sequence.")
+    except Exception:
+        for n in order:
+            try:
+                run(arms[n].stop())
+            except Exception:
+                pass
+        raise
 
 
 def apply_gripper(run, gripper, action):

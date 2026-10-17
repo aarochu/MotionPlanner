@@ -22,6 +22,13 @@ Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer?
 - **Wrist-wave intro** for `arm`: `parking` → `right1` → `left1` → `right2` → `left2` (Joint 5 twisted about ±60°)
   → `parking_close` (claw closes) → `parking_open` (claw opens), then the real sequence from `NewMid`. It is
   purely for show, and runs at the start of Run sequence and Full run (not the Simple tab's YOLO routine)
+  The wave keyframes carry `"joint_move": true`: they are direct joint moves, so the wrist always turns the taught
+  way (right +59.9°, left −59.5°), where the motion planner could pick either way round. They are refused unless
+  joints 0–4 already match (only the wrist turns in place). Every other keyframe stays planned. Re-saving one of
+  these keyframes with **Save keyframe** drops the flag; add it back in `poses.json`.
+- **🤝 Simultaneous Start Up** (Simple tab): `arm2` to `safe_bottle_start_pose`, then `arm` to `parking` (planned,
+  one at a time), then both wrists do the same wave at the same time (angles read from `arm`'s keyframes, from each
+  arm's own start), both grippers close and open, and both end at their starts ready for the sequence.
 - Export keyframes as a Python `POSES = {...}` dict for use in your own scripts
 - STOP ALL button for both arms (also stops the unscrew and the full run)
 - **Unscrew** (`arm2`): regrasp unscrew of the cap (grab, twist, open, twist back; the last twist lifts the cap)

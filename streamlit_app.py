@@ -16,7 +16,8 @@ import streamlit as st
 import poses_io
 import vision as V
 import yolo_grab as YG
-from bottle_task import POSE_KEYS, BottleTask, Mover
+from bottle_task import (POSE_KEYS, WAVE_KEYFRAMES, BottleTask, Mover, half_turn, mirror_joints,
+                         simultaneous_startup, startup_waves, wave_offsets)
 from cap_unscrew import UnscrewParams, Unscrewer, describe
 from cap_vision import circle_features, detect_circles  # cap test judged against the table's brightness
 from kinematics import ov_to_matrix
@@ -1223,6 +1224,50 @@ def confirm_pick_place():
     st.button("Yes, run it", type="primary", key="pickplace_yes")
 
 
+def startup_plan():
+    """Simultaneous Start Up plan, or (None, reason). arm waves at parking; arm2 waves at the mirror image of arm's
+    parking (both facing the middle) with the turns in reverse order (left first), then goes to its start pose."""
+    poses = load_poses()
+    kf = {(p["arm"], p["name"]): p for p in poses}
+    park, first = kf.get(("arm", "parking")), kf.get(("arm2", ARM2_FIRST_POSE))
+    if park is None or "values" not in park or first is None:
+        return None, f"Needs a joint keyframe arm/parking and the keyframe arm2/{ARM2_FIRST_POSE}."
+    try:
+        offsets = wave_offsets(poses)
+    except ValueError as e:
+        return None, str(e)
+    mirror = mirror_joints(park["values"])
+    arm2_start = {"arm": "arm2", "name": "mirror of arm's parking", "values": mirror, "approach_values": half_turn(mirror)}
+    return {"starts": {"arm2": arm2_start, "arm": park}, "waves": startup_waves(offsets),
+            "finish": {"arm2": first}}, None
+
+
+@st.dialog("Simultaneous Start Up", width="large")
+def confirm_startup():
+    plan, why = startup_plan()
+    if plan is None:
+        st.error(why)
+        return
+    fmt = lambda w: ", ".join(f"{name} {deg:+.1f}°" for name, deg in w)
+    st.markdown(
+        "1. **arm2** to its wave start: the mirror image of arm's **parking**, facing the middle, camera right side up. "
+        "If it is elsewhere it is first planned to that spot with the wrist half a turn round (the planner refuses the "
+        "camera-upright version), then turns only its wrist into place (joint move). Skipped if already there.\n"
+        "2. **arm** to **parking** (motion planner; skipped if already there).\n"
+        f"3. **Both together**, one turn at a time (joint moves, always these directions): **arm** {fmt(plan['waves']['arm'])}; "
+        f"**arm2** {fmt(plan['waves']['arm2'])} (reverse order, left first). Then both wrists back to their start.\n"
+        "4. **Both grippers** close, then open, together.\n"
+        f"5. **arm2** to **{ARM2_FIRST_POSE}** (motion planner); **arm** stays at **parking**. Ready for the sequence.")
+    st.caption("The arms move to their starts one at a time; only the wrists turn while both move. "
+               "STOP ALL stops between steps. Keep the e-stop in reach.")
+    if st.session_state.get("startup_yes"):
+        run_logged("Simultaneous Start Up",
+                   functools.partial(simultaneous_startup, run, ARMS, GRIPPERS, MOVER, plan["starts"], plan["waves"],
+                                     plan["finish"]))
+        st.rerun()
+    st.button("Yes, start up both arms", type="primary", key="startup_yes")
+
+
 def simple_view():
     st.subheader("Arm 1")
     st.caption("**Reset** parks arm 1 with the gripper open. **Run** picks the leftmost bottle with YOLO and sets it "
@@ -1234,6 +1279,11 @@ def simple_view():
     if c2.button("▶ Run YOLO pick & place", type="primary", use_container_width=True,
                  disabled=busy or "arm" not in ARMS or "arm" not in CAM_RIGS, key="simple_run"):
         confirm_pick_place()
+    both = "arm" in ARMS and "arm2" in ARMS
+    if st.button("🤝 Simultaneous Start Up", use_container_width=True, disabled=busy or not both, key="simple_startup",
+                 help="Both arms to their starts, the same wrist wave at the same time, grippers close and open, "
+                      "then both back at their starts ready for the sequence."):
+        confirm_startup()
     if busy:
         st.info("The full run or the unscrew is running; wait for it to finish.")
     try:
