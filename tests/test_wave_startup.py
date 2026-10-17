@@ -32,6 +32,11 @@ class FakeArm:
     async def stop(self):
         self.log.append(("stop", self.name, None))
 
+    async def do_command(self, cmd):
+        if "set_acceleration" in cmd:
+            self.log.append(("accel", self.name, cmd["set_acceleration"]))
+        return {}
+
 
 class FakeGripper:
     def __init__(self, name, log):
@@ -86,6 +91,11 @@ class WaveKeyframeTests(unittest.TestCase):
         self.assertEqual(len(moves), 1)
         self.assertAlmostEqual(moves[0][2][WRIST] - self.park[WRIST], 59.93, places=1)
         self.assertNotIn("planned", [e[0] for e in self.log])
+
+    def test_wave_keyframe_turns_with_high_acceleration_then_restores_it(self):
+        self.mover.go(self.kf["right1"])
+        seq = [(e[0], e[2]) if e[0] == "accel" else (e[0], None) for e in self.log if e[0] in ("accel", "joints")]
+        self.assertEqual(seq, [("accel", BT.WAVE_ACCEL), ("joints", None), ("accel", BT.DEFAULT_ACCEL)])
 
     def test_wave_keyframe_is_refused_away_from_its_pose(self):
         self.arms["arm"].joints = list(self.kf["NewMid"]["values"])
@@ -212,6 +222,34 @@ class StartupTests(unittest.TestCase):
         tail = [e[0] if e[0] != "planned" else ("planned", e[1], e[2]) for e in self.log if e[0] in ("grab", "open", "planned")]
         self.assertEqual(tail[-5:], ["grab", "grab", "open", "open", ("planned", "arm2", "safe_bottle_start_pose")])
         self.assertEqual(self.arms["arm"].joints, self.PARK, "arm ends at parking")
+
+    def test_wave_uses_high_acceleration_and_planned_moves_do_not(self):
+        self.run_startup()
+        events = [(e[0], e[1], e[2]) for e in self.log if e[0] in ("accel", "joints", "planned")]
+        parked = next(i for i, e in enumerate(events) if e[0] == "planned" and e[2] == "parking")
+        first_accel = next(i for i, e in enumerate(events) if e[0] == "accel" and i > parked)   # the shared wave
+        restore = [i for i, e in enumerate(events) if e[0] == "accel" and e[2] == BT.DEFAULT_ACCEL]
+        self.assertEqual({e[1] for e in events[first_accel:first_accel + 2]}, {"arm", "arm2"})
+        self.assertTrue(all(e[2] == BT.WAVE_ACCEL for e in events[first_accel:first_accel + 2]))
+        wave_idx = [i for i, e in enumerate(events) if e[0] == "joints"][-10:]          # the 5 shared turns x 2 arms
+        self.assertTrue(all(first_accel < i < restore[-1] for i in wave_idx), "every wave turn at high acceleration")
+        final = next(i for i, e in enumerate(events) if e[0] == "planned" and e[2] == "safe_bottle_start_pose")
+        self.assertLess(restore[-1], final, "normal acceleration restored before arm2's planned move back")
+        planned_starts = [i for i, e in enumerate(events) if e[0] == "planned" and e[2] != "safe_bottle_start_pose"]
+        self.assertTrue(all(i < first_accel for i in planned_starts), "planned moves to the starts at normal acceleration")
+
+    def test_failure_restores_normal_acceleration(self):
+        self.arms["arm"].joints = list(self.PARK)
+        self.arms["arm2"].joints = list(self.mirror)
+
+        def boom(text):
+            if text.startswith("Wave 2"):
+                raise RuntimeError("stopped")
+        with self.assertRaises(RuntimeError):
+            BT.simultaneous_startup(run, self.arms, self.grippers, self.mover, self.starts, self.waves, self.finish,
+                                    log=boom)
+        last = {e[1]: e[2] for e in self.log if e[0] == "accel"}
+        self.assertEqual(last, {"arm": BT.DEFAULT_ACCEL, "arm2": BT.DEFAULT_ACCEL})
 
     def test_failure_stops_both_arms(self):
         def boom(kf):

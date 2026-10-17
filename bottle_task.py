@@ -17,6 +17,14 @@ POSE_KEYS = ("x", "y", "z", "o_x", "o_y", "o_z", "theta")
 WRIST = 5                      # Joint 5: wrist twist
 JOINT_MOVE_TOL_DEG = 2.0       # a "joint_move" keyframe may only differ from where the arm is at the wrist
 WAVE_KEYFRAMES = ("right1", "left1", "right2", "left2")   # arm's wrist-wave intro, turned in this order
+WAVE_ACCEL = 1000.0            # joint acceleration (deg/s^2) for wrist-only wave turns (module max 1145) ...
+DEFAULT_ACCEL = 381.67         # ... restored afterwards: the xArm module's default (neither arm's config sets it)
+
+
+def set_accel(run, arms, value):
+    """Set the joint acceleration (deg/s^2) of each xArm in `arms` through its DoCommand."""
+    for arm in arms:
+        run(arm.do_command({"set_acceleration": float(value)}))
 
 
 class Mover:
@@ -80,7 +88,11 @@ class Mover:
                              f"pose (joints 0-4 are {off:.1f}° away, limit {JOINT_MOVE_TOL_DEG:g}°). "
                              "Play the keyframe before it first.")
         with self._lock:
-            self.run(arm.move_to_joint_positions(JointPositions(values=target)))
+            set_accel(self.run, [arm], WAVE_ACCEL)        # quicker wrist turns; restored even if the move fails
+            try:
+                self.run(arm.move_to_joint_positions(JointPositions(values=target)))
+            finally:
+                set_accel(self.run, [arm], DEFAULT_ACCEL)
 
 
 def wave_offsets(poses, arm="arm", base="parking", wave=WAVE_KEYFRAMES):
@@ -170,6 +182,8 @@ def simultaneous_startup(run, arms, grippers, mover, starts, waves, finish=None,
                 log(f"Moving {n} to its wave start, {kf['name']} (motion planner, collision-checked)")
                 mover.go(kf)
         base = {n: [float(v) for v in run(arms[n].get_joint_positions()).values] for n in order}
+        log(f"Joint acceleration {WAVE_ACCEL:.0f}°/s² for the wave (normal {DEFAULT_ACCEL:.0f})")
+        set_accel(run, [arms[n] for n in order], WAVE_ACCEL)
 
         def wrists(offsets, text):
             check()
@@ -188,6 +202,7 @@ def simultaneous_startup(run, arms, grippers, mover, starts, waves, finish=None,
         check()
         log("Opening every gripper, together")
         run(together([grippers[n].open() for n in order]))
+        set_accel(run, [arms[n] for n in order], DEFAULT_ACCEL)   # planned moves at normal acceleration
         for n in finish:
             check()
             log(f"Moving {n} to {finish[n]['name']} (motion planner, collision-checked)")
@@ -200,6 +215,10 @@ def simultaneous_startup(run, arms, grippers, mover, starts, waves, finish=None,
                 run(arms[n].stop())
             except Exception:
                 pass
+        try:
+            set_accel(run, [arms[n] for n in order], DEFAULT_ACCEL)
+        except Exception:
+            pass
         raise
 
 
