@@ -381,7 +381,8 @@ function loadVoices() {
   voiceSelect.innerHTML = "";
   const stored = localStorage.getItem("tts_voice_name");
   let selected = false;
-  for (const v of voices) {
+  // Show only the first 5 installed voices to keep the dropdown short.
+  for (const v of voices.slice(0, 5)) {
     const o = document.createElement("option");
     o.value = v.name;
     o.textContent = v.name + (v.default ? " (default)" : "");
