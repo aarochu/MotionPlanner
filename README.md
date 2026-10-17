@@ -235,6 +235,16 @@ and grab, back out, straight nudges, level, yaw).
 
 How it aims, and the numbers measured on 2026-10-16:
 
+- **Which bottle (detection stability, 2026-10-17):** each of the 3 frames is not judged on its own. Bottles are
+  followed across frames by their world position (same bottle if within `match_mm` = 40 mm), down to confidence
+  `track_conf` = 0.2. A bottle counts if it is seen in at least 2 of 3 frames and reaches `conf` = 0.35 in at least
+  one; the leftmost such bottle is the target and the next one is the neighbour. Before this, a bottle whose
+  confidence dipped below the cutoff in one frame let a different bottle become "the leftmost" in that frame, and
+  the run stopped with "Frames disagree by 184 mm". If the frames still disagree, the locate measures again in
+  place up to `remeasure` = 2 times (no arm move) before giving up. Logic: `select_tracks()` in `yolo_grab.py`.
+  A plain, single-color background behind the box raised YOLO's confidence for a bottle at the far left from
+  0.32–0.61 to about 0.9.
+
 - The bottle axis comes from depth on the leftmost box's centre strip; the bottle's width per height comes from its
   silhouette (cobalt glass + depth). The grasp is at 35% of the bottle's height, with the gripper level.
 - **Lateral trim 18 mm (right)**: the frame system puts the camera 46 mm left of the gripper; by eye the camera's

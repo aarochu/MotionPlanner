@@ -214,5 +214,62 @@ class BackupTests(unittest.TestCase):
     def test_three_samples_by_default(self):
         self.assertEqual(YG.DEFAULTS["frames"], 3)
 
+def cand(x, y, u, conf):
+    return {"axis": np.array([float(x), float(y), 176.0]), "u": float(u), "conf": float(conf)}
+
+
+class TrackTests(unittest.TestCase):
+    """select_tracks: follow each bottle across frames so a flickering detection can't swap the target."""
+    cfg = dict(YG.DEFAULTS)
+
+    def test_flickering_left_bottle_stays_the_target(self):
+        # the live failure: the left bottle drops to 0.40 in one frame, so per-frame "leftmost" picked the right one
+        left, right = (542, -384, 715), (545, -535, 976)
+        frames = [[cand(*left, 0.30), cand(*right, 0.79)],
+                  [cand(*left, 0.61), cand(*right, 0.75)],
+                  [cand(*left, 0.67), cand(*right, 0.82)]]
+        tracks = YG.select_tracks(frames, self.cfg)
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual(sorted(tracks[0]), [0, 1, 2], "the left bottle is followed in all three frames")
+        self.assertTrue(all(abs(c["axis"][1] + 384) < 1 for c in tracks[0].values()))
+        self.assertTrue(all(abs(c["axis"][1] + 535) < 1 for c in tracks[1].values()), "right bottle is the neighbour")
+
+    def test_bottle_seen_in_only_one_frame_is_ignored(self):
+        frames = [[cand(300, -200, 100, 0.9), cand(542, -384, 715, 0.7)],
+                  [cand(542, -384, 715, 0.7)],
+                  [cand(542, -384, 715, 0.7)]]
+        tracks = YG.select_tracks(frames, self.cfg)
+        self.assertEqual(len(tracks), 1)
+        self.assertAlmostEqual(tracks[0][0]["axis"][1], -384)
+
+    def test_bottle_that_never_reaches_conf_is_not_chosen(self):
+        frames = [[cand(542, -384, 715, 0.30), cand(545, -535, 976, 0.8)] for _ in range(3)]   # below conf 0.35
+        tracks = YG.select_tracks(frames, self.cfg)
+        self.assertEqual(len(tracks), 1)
+        self.assertAlmostEqual(tracks[0][0]["axis"][1], -535)
+
+    def test_small_jitter_is_one_bottle_and_a_far_jump_is_another(self):
+        frames = [[cand(542, -384, 715, 0.7)], [cand(545, -381, 712, 0.7)], [cand(542, -330, 640, 0.7)]]
+        tracks = YG.select_tracks(frames, self.cfg)
+        self.assertEqual(len(tracks), 1, "the 54 mm jump is not the same bottle")
+        self.assertEqual(sorted(tracks[0]), [0, 1])
+
+    def test_nothing_counts_when_no_bottle_is_seen_often_enough(self):
+        frames = [[cand(542, -384, 715, 0.9)], [], []]
+        self.assertEqual(YG.select_tracks(frames, self.cfg), [])
+
+
+class RemeasureTests(unittest.TestCase):
+    def test_disagreeing_frames_are_measured_again_in_place_without_moving(self):
+        m_bad, m_good = measurement(), measurement()
+        m_bad["spread_mm"], m_good["spread_mm"] = 184.0, 1.0
+        rpc = mock.Mock(side_effect=AssertionError("the arm must not move for a re-measure"))
+        with mock.patch.object(YG, "measure", side_effect=[m_bad, m_good]) as meas:
+            m = YG.locate(None, rpc, None, None, None, "cam", "gripper", dict(YG.DEFAULTS), log=lambda *_: None)
+        self.assertEqual(m["spread_mm"], 1.0)
+        self.assertEqual(meas.call_count, 2)
+        rpc.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

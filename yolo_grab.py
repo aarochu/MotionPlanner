@@ -23,7 +23,9 @@ import vision as V
 POSE_KEYS = ("x", "y", "z", "o_x", "o_y", "o_z", "theta")
 DEFAULTS = {
     "service": "bottle-yolo",
-    "conf": 0.5,             # YOLO confidence for a bottle
+    "conf": 0.35,            # YOLO confidence a bottle must reach in at least one frame (was 0.5). Safe this low
+                             # because it must also be followed in most frames (select_tracks): at the far left
+                             # of the box our bottle reads only 0.40-0.56
     "frames": 3,             # frames measured; the median is used (at least 2 must have usable depth)
     "radius": 40.0,          # bottle radius (Saratoga 28 oz is about 38-40 mm)
     "grasp_frac": 0.35,      # grasp height as a fraction of the bottle's height, measured from its bottom
@@ -38,6 +40,10 @@ DEFAULTS = {
     "finger_mm": 12.0,       # finger thickness outside the opening
     "grip_half_h_mm": 40.0,  # gripper body + fingers reach this far below/above the grasp height
     "max_spread_mm": 10.0,   # frames must agree within this (bottle axis, horizontal)
+    "track_conf": 0.2,       # a bottle is followed across frames down to this confidence ...
+                             # ... and chosen only if it reaches "conf" in at least one frame
+    "match_mm": 40.0,        # detections in different frames within this (axis, horizontal) are the same bottle
+    "remeasure": 2,          # frames still disagree: measure again in place (no arm move) up to this many times
     "depth_lo": 250, "depth_hi": 1200,
     "pre_step_mm": 40.0,     # step length on the way to the pre-grasp
     "in_step_mm": 20.0,      # step length for the final straight approach / back-out
@@ -149,11 +155,35 @@ def frame_axes(run, robot, name):
     return {"origin": o, "x": ax[0], "y": ax[1], "z": ax[2]}
 
 
+def select_tracks(frames, cfg):
+    """Follow each bottle across frames and pick the target, so a detection that flickers in one frame can't swap in
+    a different bottle.
+
+    frames: one list per frame of candidates {"axis": world xyz, "u": image x centre, "conf": ...}.
+    Candidates within cfg["match_mm"] (axis, horizontal) in different frames are the same bottle (a "track"). A track
+    counts if it is seen in at least `need` frames and reaches cfg["conf"] in at least one of them. Returns the
+    counting tracks sorted left to right in the image: each is {frame index: candidate}. Empty if none count."""
+    need = max(2, len(frames) // 2 + 1)
+    tracks = []
+    for fi, cands in enumerate(frames):
+        for c in sorted(cands, key=lambda c: -c["conf"]):
+            near = [(float(np.linalg.norm(np.median([x["axis"] for x in t.values()], axis=0)[:2] - c["axis"][:2])), i)
+                    for i, t in enumerate(tracks) if fi not in t]   # one candidate per frame per track
+            near = [(d, i) for d, i in near if d <= cfg["match_mm"]]
+            if near:
+                tracks[min(near)[1]][fi] = c
+            else:
+                tracks.append({fi: c})
+    good = [t for t in tracks if len(t) >= need and max(c["conf"] for c in t.values()) >= cfg["conf"]]
+    return sorted(good, key=lambda t: float(np.median([c["u"] for c in t.values()])))
+
+
 def measure(run, robot, arm, cam, cam_frame, grip_frame, cfg, check=lambda: None):
     """Read-only. Raises ValueError with a plain reason when the bottle can't be measured reliably."""
     detector = VisionClient.from_robot(robot, cfg["service"])
     joints_before = list(run(arm.get_joint_positions()).values)
-    per, last = [], None
+    frames, raw, last = [], [], None
+    track_conf = min(cfg.get("track_conf", cfg["conf"]), cfg["conf"])
     for _ in range(int(cfg["frames"])):
         check()
         cap = V.capture_frame(run, robot, cam, cam_frame, "arm")
@@ -162,19 +192,33 @@ def measure(run, robot, arm, cam, cam_frame, grip_frame, cfg, check=lambda: None
         ok, enc = cv2.imencode(".jpg", cap["bgr"])
         dets = run(detector.get_detections(ViamImage(enc.tobytes(), CameraMimeType.JPEG)))
         H, W = cap["bgr"].shape[:2]
-        bottles = sorted((d for d in dets if d.class_name.lower() == "bottle" and d.confidence >= cfg["conf"]),
+        bottles = sorted((d for d in dets if d.class_name.lower() == "bottle" and d.confidence >= track_conf),
                          key=lambda d: d.x_min + d.x_max)
-        last = (cap, bottles)
-        t = _bottle(cap, bottles[0], cfg, cfg["radius"], W, H) if bottles else None
-        n = _bottle(cap, bottles[1], cfg, 0.0, W, H) if len(bottles) > 1 else None
-        per.append({"target": t, "neighbor": n, "count": len(bottles)} if t else None)
+        last = (cap, [d for d in bottles if d.confidence >= cfg["conf"]])
+        cands = []
+        for d in bottles:
+            b = _bottle(cap, d, cfg, cfg["radius"], W, H)
+            if b is not None:
+                b.update(u=(d.x_min + d.x_max) / 2, det=d, cap=cap, W=W, H=H)
+                cands.append(b)
+        frames.append(cands)
+        raw.append(len([d for d in bottles if d.confidence >= cfg["conf"]]))
     if np.max(np.abs(np.array(run(arm.get_joint_positions()).values) - joints_before)) > 0.2:
         raise ValueError("The arm moved while measuring; measure again with the arm still.")
-    good = [p for p in per if p]
     need = max(2, int(cfg["frames"]) // 2 + 1)
-    if len(good) < need:
-        raise ValueError(f"The leftmost bottle had usable depth in only {len(good)} of {int(cfg['frames'])} frames "
-                         f"(need {need}). Check the bottle is in view and 25-120 cm from the camera.")
+    tracks = select_tracks(frames, cfg)
+    if not tracks:
+        raise ValueError(f"No bottle was seen with usable depth in at least {need} of {int(cfg['frames'])} frames "
+                         f"(with confidence {cfg['conf']:.2f} in at least one). Check the bottle is in view and "
+                         f"25-120 cm from the camera.")
+    target, neighbor = tracks[0], (tracks[1] if len(tracks) > 1 else None)
+
+    def as_neighbor(c):   # the neighbour is measured at its front surface (radius 0), as before
+        return _bottle(c["cap"], c["det"], cfg, 0.0, c["W"], c["H"])
+
+    good = [{"target": target[fi],
+             "neighbor": as_neighbor(neighbor[fi]) if neighbor is not None and fi in neighbor else None,
+             "count": raw[fi]} for fi in sorted(target)]
 
     def med(key, who="target"):
         vals = [p[who][key] for p in good if p[who] is not None]
@@ -470,6 +514,12 @@ def locate(run, rpc, robot, arm, cam, cam_frame, grip_frame, cfg, check=lambda: 
         log(f"Locating the leftmost bottle (YOLO + depth, {int(cfg['frames'])} frames)")
         try:
             m = measure(run, robot, arm, cam, cam_frame, grip_frame, cfg, check)
+            for again in range(int(cfg.get("remeasure", 0))):
+                if m["spread_mm"] <= cfg["max_spread_mm"]:
+                    break
+                log(f"Frames disagree by {m['spread_mm']:.0f} mm; measuring again in place "
+                    f"({again + 1}/{int(cfg['remeasure'])})")
+                m = measure(run, robot, arm, cam, cam_frame, grip_frame, cfg, check)
             if not m["clipped"]:
                 return m
             why = f"the bottle is cut off at the {', '.join(m['clipped_edges'])} edge of the image"
