@@ -402,6 +402,7 @@ const API = window.location.origin;
 let POLL_MS = 1000;
 let pollTimer = null;
 let lastJointsError = null;
+let connected = false;
 let camTimer = null;
 let camPreviewOn = false;
 let busyCount = 0;
@@ -522,10 +523,12 @@ function setStatus(id, text, kind = "idle") {
 async function checkHealth() {
   try {
     await api("/api/health");
+    connected = true;
     document.getElementById("connStatus").innerHTML = '<span class="dot"></span>connected';
     document.getElementById("apiBadge").textContent = "api: ok";
   } catch (e) {
-    document.getElementById("connStatus").innerHTML = '<span class="dot off"></span>api unreachable';
+    connected = false;
+    document.getElementById("connStatus").innerHTML = '<span class="dot off"></span>disconnected';
     document.getElementById("apiBadge").textContent = "api: down";
   }
 }
@@ -587,10 +590,16 @@ document.getElementById("btnStopAll").onclick = async () => {
 
 /* ================= status polling ================= */
 async function pollStatus() {
+  if (!connected) return;
   try {
     const st = await api("/api/status");
     const a1 = st.arms.arm;
     const a2 = st.arms.arm2;
+    const armsUnavailable = (!a1 || a1.error) && (!a2 || a2.error);
+    if (armsUnavailable) {
+      log("Robot not connected. Add VIAM_API_KEY_ID and VIAM_API_KEY to .env and restart.", "warn");
+      return;
+    }
     if (st.unscrew && st.unscrew.state !== "idle") {
       setStatus("arm2Status", st.unscrew.step, "busy");
       document.getElementById("btnUnscrewStop").disabled = false;
@@ -658,6 +667,7 @@ function buildJointBox(arm, j, pos) {
 }
 
 async function refreshJoints() {
+  if (!connected) return;
   try {
     const data = await api("/api/arms");
     if (lastJointsError !== null) {
@@ -668,6 +678,10 @@ async function refreshJoints() {
     const tgtGrid = document.getElementById("jointTargets");
     grid.innerHTML = "";
     tgtGrid.innerHTML = "";
+    if (!data.arms || data.arms.length === 0) {
+      log("No arms configured. Set VIAM_API_KEY_ID and VIAM_API_KEY in .env.", "warn");
+      return;
+    }
     for (const arm of data.arms) {
       try {
         const j = await api(`/api/arm/${arm}/joints`);

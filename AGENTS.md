@@ -72,6 +72,7 @@ cd backend && uv sync && cd ..
 
 # fill in credentials (Viam app -> Connect -> Code sample)
 cp env.sh.example .env   # or edit backend/.env
+# You need VIAM_API_KEY_ID and VIAM_API_KEY to connect to the machine.
 
 # start backend + open frontend
 ./run.sh                 # http://127.0.0.1:8000
@@ -80,6 +81,8 @@ cp env.sh.example .env   # or edit backend/.env
 The frontend is a single self-contained page (`frontend/index.html`: HTML + CSS + ES6, no build step). It talks to the FastAPI backend (`backend/main:app`) over HTTP. TTS is fully client-side via the Web Speech API — no backend needed for speech.
 
 The sidebar's **Active arm** concept from the Streamlit app is replaced by per-arm sections in the frontend; arm 1 and arm 2 each have their own controls.
+
+**Without credentials** (`VIAM_API_KEY_ID` / `VIAM_API_KEY`), the server starts but all arm endpoints return 500. The frontend will show "disconnected" and stop polling once it detects no arms are available.
 
 ## 5. Keyframes and sequencing
 
