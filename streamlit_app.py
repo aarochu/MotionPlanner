@@ -766,9 +766,9 @@ if CAMERA is not None and CAM_ARM in ARMS:
             settings = {"yolo": ycfg}
             busy = FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running)
             if st.button("🔍 Locate leftmost bottle", type="primary", use_container_width=True,
-                         help="Read-only: YOLO + aligned depth over 5 frames, then plans a head-on grab. Nothing moves."):
+                         help="Read-only: YOLO + aligned depth over a few frames, then plans a head-on grab. Nothing moves."):
                 try:
-                    with st.spinner("Measuring over 5 frames…"):
+                    with st.spinner(f"Measuring over {int(ycfg['frames'])} frames…"):
                         m = YG.measure(run, ROBOT, ARMS["arm"], CAMERA, CAM, CAM_GRIPPER, ycfg)
                     st.session_state.update(yg_meas=m, yg_plan=YG.plan(m, ycfg), yg_cfg_used=ycfg, yg_status="")
                 except Exception as e:
@@ -1162,11 +1162,14 @@ def confirm_pick_place():
     cfg = dict(YG.DEFAULTS)
     st.markdown(
         "1. Open the gripper and go to **NewMid** (arm 1 must start at parking or NewMid).\n"
-        "2. YOLO + depth locate the leftmost bottle; any failed check stops here.\n"
+        f"2. YOLO + depth locate the leftmost bottle ({int(cfg['frames'])} frames). If it is not fully in view, back up "
+        f"{cfg['backup_mm']:.0f} mm in x and look again (up to {int(cfg['max_backups'])} times); any failed check "
+        "stops here.\n"
         f"3. Level pre-grasp {cfg['pre_mm']:.0f} mm in front, straight in, grab (opens and backs out on a miss).\n"
         f"4. Lift {YG.LIFT_MM:.0f} mm, carry to above the place spot, set it down at a height worked out from the "
         "measured bottle, and keep holding it.")
-    st.caption(f"Grasp trims: {cfg['lat_trim_mm']:+.0f} mm right, {cfg['depth_trim_mm']:+.0f} mm deeper than the "
+    st.caption(f"Known bottle {cfg['bottle_diam_mm']:.0f} mm in the {cfg['stroke_mm']:.0f} mm gripper. "
+               f"Grasp trims: {cfg['lat_trim_mm']:+.0f} mm right, {cfg['depth_trim_mm']:+.0f} mm deeper than the "
                f"bottle axis. Table at z {YG.TABLE_Z:+.1f} mm. Only arm 1 moves: make sure arm 2 is clear of the place "
                "spot. STOP ALL stops between steps; keep the e-stop in reach.")
     if st.session_state.get("pickplace_yes"):

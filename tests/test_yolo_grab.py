@@ -41,9 +41,15 @@ class PlanTests(unittest.TestCase):
         self.assertAlmostEqual(float((p["A"] - axis).dot(p["a"])), cfg["depth_trim_mm"], places=6)
         np.testing.assert_allclose(pads(p["pre"], p["reach"]), p["A"] - cfg["pre_mm"] * p["a"], atol=1e-6)
 
-    def test_a_bottle_wider_than_the_gripper_is_refused(self):
+    def test_the_known_bottle_size_is_used_not_the_measured_width(self):
         m = measurement()
-        m["profile"] = {f: 90.0 for f in m["profile"]}
+        m["profile"] = {f: 93.0 for f in m["profile"]}          # reads wider than the 84 mm opening
+        checks = YG.plan(m, YG.DEFAULTS)["checks"]
+        self.assertNotIn("error", [c[0] for c in checks])
+
+    def test_a_target_far_wider_than_the_bottle_is_refused(self):
+        m = measurement()
+        m["profile"] = {f: 130.0 for f in m["profile"]}         # e.g. two bottles in one box
         self.assertIn("error", [c[0] for c in YG.plan(m, YG.DEFAULTS)["checks"]])
 
     def test_unstable_detection_is_refused(self):
@@ -157,6 +163,56 @@ class SequenceTests(unittest.TestCase):
         self.assertEqual(self.gripper.open.call_count, 2)
         self.assertNotIn(("joints", list(YG.PLACE_ABOVE_JOINTS)), arm.log)
 
+
+class BackupTests(unittest.TestCase):
+    """At NewMid, a bottle cut off by the image edge (or not seen) makes the arm back up in -x and look again."""
+    def setUp(self):
+        self.gripper = N(open=mock.Mock(), grab=mock.Mock(return_value=True))
+        self.arm = FakeArm(NEWMID, NEWMID_END)
+        self.looked_from = []
+
+    def looks(self, *outcomes):
+        """measure() stand-in: each call records where the arm is and returns/raises the next outcome."""
+        it = iter(outcomes)
+
+        def fake_measure(*args, **kwargs):
+            self.looked_from.append(self.arm.end["x"])
+            out = next(it)
+            if isinstance(out, Exception):
+                raise out
+            m = measurement(self.arm.end)
+            m.update(clipped=out == "cut", clipped_edges=["top"] if out == "cut" else [])
+            return m
+        return mock.patch.object(YG, "measure", side_effect=fake_measure)
+
+    def run_pick(self):
+        return YG.pick_and_place(call, call, None, self.arm, self.gripper, None, "cam", "gripper", NEWMID, PARKING,
+                                 YG.DEFAULTS, log=lambda s: None)
+
+    def test_cut_off_bottle_backs_up_once_then_picks(self):
+        with self.looks("cut", "ok"):
+            self.run_pick()
+        x0 = NEWMID_END["x"]
+        self.assertEqual(self.looked_from, [x0, x0 - YG.DEFAULTS["backup_mm"]])
+        self.gripper.grab.assert_called_once()
+
+    def test_nothing_seen_also_backs_up(self):
+        with self.looks(ValueError("no bottle"), "ok"):
+            self.run_pick()
+        self.assertEqual(len(self.looked_from), 2)
+        self.gripper.grab.assert_called_once()
+
+    def test_gives_up_after_the_last_backup_without_grabbing(self):
+        n = int(YG.DEFAULTS["max_backups"]) + 1
+        with self.looks(*["cut"] * n):
+            with self.assertRaises(ValueError):
+                self.run_pick()
+        x0 = NEWMID_END["x"]
+        np.testing.assert_allclose(self.looked_from, [x0 - k * YG.DEFAULTS["backup_mm"] for k in range(n)])
+        self.gripper.grab.assert_not_called()
+
+    def test_three_samples_by_default(self):
+        self.assertEqual(YG.DEFAULTS["frames"], 3)
 
 if __name__ == "__main__":
     unittest.main()

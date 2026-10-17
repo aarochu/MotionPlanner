@@ -220,7 +220,8 @@ Both ask for confirmation, move only arm 1, and STOP ALL stops them between step
 - **Reset arm 1**: open the gripper; unless already at `parking`, back straight out 100 mm along the gripper,
   rise to z 380 mm, then a joint move to `parking`. The retreat and rise keep the fingers off a bottle just placed.
 - **Run YOLO pick & place** (must start at `parking` or `NewMid`): `NewMid` → YOLO + aligned depth locate the
-  leftmost bottle over 5 frames → level pre-grasp 100 mm in front → straight in → grab (on a miss: open, back out,
+  leftmost bottle over 3 frames (if it is cut off by the image edge or not seen, back up 100 mm in −x and look
+  again, at most twice) → level pre-grasp 100 mm in front → straight in → grab (on a miss: open, back out,
   stop) → lift 100 mm → joint move to above the place spot → straight down to a set-down height worked out from
   the measured bottle → keep holding it (arm 1 steadies the bottle for arm 2).
 
@@ -235,8 +236,9 @@ How it aims, and the numbers measured on 2026-10-16:
 - **Lateral trim 18 mm (right)**: the frame system puts the camera 46 mm left of the gripper; by eye the camera's
   centre estimate still read ~18 mm left of the real centre. **Depth trim +20 mm**: the finger pads go 20 mm past
   the bottle axis. Both are settings in `yolo_grab.DEFAULTS` and the YOLO grab settings panel.
-- Body grasps are tight: the bottle is ~80 mm, the gripper opens 84 mm. The plan refuses only if the bottle reads
-  more than 2.5 mm per side wider than the opening.
+- The bottle is a known size (~80 mm; the gripper opens 84 mm), so the plan uses `bottle_diam_mm` rather than
+  the measured width, which reads high (tape band, edge blur, a cut-off box). It still refuses a target that reads
+  over `max_width_mm` (115 mm): that is not one bottle.
 - Place spot: arm end at x −91.1, y −379.5, heading −31.9°, level; `PLACE_ABOVE_JOINTS` puts it 200 mm up.
   `TABLE_Z = -8.7` mm (bottle set down by eye at arm-end z 104.0 with the pads 112.7 mm above its measured bottom).
   Set-down height = `TABLE_Z` + (grasp height − bottle bottom), from each run's measurement.
