@@ -28,7 +28,8 @@
           254.03183802645592
         ],
         "gripper": "",
-        "delay": 0.0
+        "delay": 0.0,
+        "joint_move": true
       },
       {
         "name": "left1",
@@ -42,35 +43,8 @@
           134.60432748300383
         ],
         "gripper": "",
-        "delay": 0.0
-      },
-      {
-        "name": "right2",
-        "arm": "arm",
-        "values": [
-          -34.849998636141635,
-          -75.7900056721309,
-          -2.9400017808225094,
-          164.90999977375546,
-          9.429998224740554,
-          254.03183802645592
-        ],
-        "gripper": "",
-        "delay": 0.0
-      },
-      {
-        "name": "left2",
-        "arm": "arm",
-        "values": [
-          -34.849998636141635,
-          -75.78999884194174,
-          -2.940000073275217,
-          164.90999977375546,
-          9.429999932287847,
-          134.60432748300383
-        ],
-        "gripper": "",
-        "delay": 0.0
+        "delay": 0.0,
+        "joint_move": true
       },
       {
         "name": "parking_close",
@@ -84,7 +58,8 @@
           194.10666790935048
         ],
         "gripper": "grab",
-        "delay": 0.0
+        "delay": 0.0,
+        "joint_move": true
       },
       {
         "name": "parking_open",
@@ -98,7 +73,38 @@
           194.10666790935048
         ],
         "gripper": "open",
-        "delay": 0.0
+        "delay": 0.0,
+        "joint_move": true
+      },
+      {
+        "name": "parking_close2",
+        "arm": "arm",
+        "values": [
+          -34.84819205110617,
+          -75.79478680454991,
+          -2.9429078128709385,
+          164.9093987171085,
+          9.42692890848228,
+          194.10666790935048
+        ],
+        "gripper": "grab",
+        "delay": 0.0,
+        "joint_move": true
+      },
+      {
+        "name": "parking_open2",
+        "arm": "arm",
+        "values": [
+          -34.84819205110617,
+          -75.79478680454991,
+          -2.9429078128709385,
+          164.9093987171085,
+          9.42692890848228,
+          194.10666790935048
+        ],
+        "gripper": "open",
+        "delay": 0.0,
+        "joint_move": true
       },
       {
         "name": "NewMid",
@@ -147,6 +153,54 @@
   "arm2": {
     "description": "Keyframes for arm2 (with cam2 and gripper2): unscrews the cap. NOT for arm.",
     "keyframes": [
+      {
+        "name": "arm2_wave_start",
+        "arm": "arm2",
+        "values": [
+          34.84819205110617,
+          -75.79478680454991,
+          -2.9429078128709385,
+          -164.9093987171085,
+          9.42692890848228,
+          -194.10666790935048
+        ],
+        "gripper": "",
+        "delay": 0.0,
+        "joint_move": true,
+        "startup": true
+      },
+      {
+        "name": "arm2_wave_left",
+        "arm": "arm2",
+        "values": [
+          34.84819205110617,
+          -75.79478680454991,
+          -2.9429078128709385,
+          -164.9093987171085,
+          9.42692890848228,
+          -253.60900833569713
+        ],
+        "gripper": "",
+        "delay": 0.0,
+        "joint_move": true,
+        "startup": true
+      },
+      {
+        "name": "arm2_wave_right",
+        "arm": "arm2",
+        "values": [
+          34.84819205110617,
+          -75.79478680454991,
+          -2.9429078128709385,
+          -164.9093987171085,
+          9.42692890848228,
+          -134.18149779224504
+        ],
+        "gripper": "",
+        "delay": 0.0,
+        "joint_move": true,
+        "startup": true
+      },
       {
         "name": "safe_bottle_start_pose",
         "arm": "arm2",
@@ -224,19 +278,19 @@
     },
     {
       "arm": "arm",
-      "name": "right2"
-    },
-    {
-      "arm": "arm",
-      "name": "left2"
-    },
-    {
-      "arm": "arm",
       "name": "parking_close"
     },
     {
       "arm": "arm",
       "name": "parking_open"
+    },
+    {
+      "arm": "arm",
+      "name": "parking_close2"
+    },
+    {
+      "arm": "arm",
+      "name": "parking_open2"
     },
     {
       "arm": "arm",
@@ -249,6 +303,18 @@
     {
       "arm": "arm",
       "name": "end"
+    },
+    {
+      "arm": "arm2",
+      "name": "arm2_wave_start"
+    },
+    {
+      "arm": "arm2",
+      "name": "arm2_wave_left"
+    },
+    {
+      "arm": "arm2",
+      "name": "arm2_wave_right"
     },
     {
       "arm": "arm2",

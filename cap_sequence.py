@@ -1,4 +1,5 @@
-"""The whole bottle-opening job as one list of retryable steps (runs in a background thread):
+"""The whole bottle-opening job as one list of retryable steps (runs in a background thread). The dashboard puts
+two steps in front (reset both arms, the simultaneous start-up wave), then:
 
   1 arm 1: YOLO pick & place (resets first if needed; ends holding the bottle at the place spot)
   2 arm 2: open gripper2, look: planned move to the look pose (open_bottle_cap_up_pose, over the place spot)
@@ -23,7 +24,7 @@ import bottle_track as BT
 # 80 % of that; arm 1's YOLO pick & place runs at the configured normal speed; arm 2 is put back to normal at the end.
 FAST = {"set_speed": 144.0, "set_acceleration": 916.0}
 NORMAL = {"set_speed": 60.0, "set_acceleration": 381.67}
-DOWN_MM = 90.0  # look pose -> fingers around the cap (the look pose is 100 mm above the taught cap pose; stop 1 cm higher)
+DOWN_MM = 100.0  # look pose -> fingers around the cap (the look pose is 100 mm above the taught cap pose)
 LINEAR = (5.0, 5.0)
 
 
@@ -31,14 +32,16 @@ class Job:
     """Steps for the full job. arm1_pick: callable(check, log) doing arm 1's YOLO pick & place, or None (arm 2 only)."""
 
     def __init__(self, run, mover, tracker, unscrewer, arm2, gripper2, arm1_pick, look_kf, drop_pose, unscrew_params,
-                 halt_all, top_z=BT.BOTTLE_TOP_Z, top_d=BT.TOP_D_MM, arm1=None):
+                 halt_all, top_z=BT.BOTTLE_TOP_Z, top_d=BT.TOP_D_MM, arm1=None, pre=()):
         self.run, self.mover, self.tracker, self.unscrewer = run, mover, tracker, unscrewer
         self.arm1 = arm1
         self.arm2, self.gripper2, self.arm1_pick, self.halt_all = arm2, gripper2, arm1_pick, halt_all
         self.look_kf, self.drop_pose, self.unscrew_params = look_kf, drop_pose, unscrew_params
         self.top_z, self.top_d = top_z, top_d
         self.look_z = float(look_kf["pose"]["z"])
-        self.steps = [("Arm 1: YOLO pick & place", self._pick),
+        # pre: [(name, fn(check, log))] run first (reset both arms, the start-up wave)
+        self.steps = [(name, (lambda fn: lambda r: fn(r.check, r.log))(fn)) for name, fn in pre] + [
+                      ("Arm 1: YOLO pick & place", self._pick),
                       ("Arm 2: look at the bottle top", self._look),
                       ("Arm 2: lock on the cap", self._lock_on),
                       (f"Arm 2: down {DOWN_MM:.0f} mm onto the cap", self._down),

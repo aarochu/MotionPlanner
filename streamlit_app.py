@@ -19,7 +19,9 @@ import vision as V
 import yolo_grab as YG
 import bottle_track as BT
 from cap_vision import CapVision
-from bottle_task import POSE_KEYS, BottleTask, Mover
+from bottle_task import (DEFAULT_GRIPPER_SPEED, GRIP_CYCLES, POSE_KEYS, WAVE_ACCEL, WAVE_GRIPPER_SPEED, WAVE_SPEED,
+                         BottleTask, Mover, simultaneous_startup)
+from bottle_task import startup_plan as bottle_startup_plan
 from cap_unscrew import UnscrewParams, Unscrewer, describe
 from cap_vision import circle_features, detect_circles  # cap test judged against the table's brightness
 from kinematics import ov_to_matrix
@@ -189,11 +191,19 @@ def keyframe_text(p):
     return "  ".join(f"{v:7.1f}" for v in p["values"])
 
 
-def apply_gripper(arm, action):
-    if action == "grab":
-        return rpc(GRIPPERS[arm].grab)
-    elif action == "open":
-        rpc(GRIPPERS[arm].open)
+def apply_gripper(arm, action, fast=False):
+    """grab / open. fast: at the wave's gripper speed for this one action, then back to the default."""
+    fast = fast and action in ("grab", "open")
+    if fast:
+        rpc(GRIPPERS[arm].do_command, {"set_gripper_speed": WAVE_GRIPPER_SPEED})
+    try:
+        if action == "grab":
+            return rpc(GRIPPERS[arm].grab)
+        elif action == "open":
+            rpc(GRIPPERS[arm].open)
+    finally:
+        if fast:
+            rpc(GRIPPERS[arm].do_command, {"set_gripper_speed": DEFAULT_GRIPPER_SPEED})
 
 
 def safely(fn, *args):
@@ -423,7 +433,7 @@ def confirm_go(idx):
         def go():
             go_to_keyframe(p)
             check_action_stop()
-            apply_gripper(p["arm"], p.get("gripper"))
+            apply_gripper(p["arm"], p.get("gripper"), fast=bool(p.get("joint_move")))
         with st.spinner("Moving…"):
             ok = safely(go)
         if ok:
@@ -461,7 +471,7 @@ def confirm_run(selection, first=None, last=None):
             def step_fn(p=p):
                 go_to_keyframe(p)
                 check_action_stop()
-                apply_gripper(p["arm"], p.get("gripper"))
+                apply_gripper(p["arm"], p.get("gripper"), fast=bool(p.get("joint_move")))
             if not safely(step_fn):
                 return
             wait = p.get("delay", 0.0)
@@ -948,7 +958,7 @@ if UNSCREWER is not None:
         twist_deg = c2.number_input("Degrees per twist", 10.0, 170.0, 120.0, 5.0)
         final_lift = c3.number_input("Final lift (mm)", 0.0, 100.0, 30.0, 5.0,
                                      help="After the last twist, lift this far while holding the cap; it ends there.")
-        grip_force = c4.number_input("Grip force (%)", 1, 100, 60, 5,
+        grip_force = c4.number_input("Grip force (%)", 1, 100, 90, 5,
                                      help="G2 gripper grasp force for every grab; reset to 50% afterwards.")
         c1, c2, c3, c4 = st.columns(4)
         speed = c1.number_input("Speed (°/s)", 3.0, 60.0, 60.0, 1.0)
@@ -962,7 +972,7 @@ if UNSCREWER is not None:
         start_kf = next((q for q in load_poses() if q["name"] == start_pose), {})
         start_joints = tuple(start_kf.get("values", ()))
         start_target = tuple(float(start_kf["pose"][k]) for k in POSE_KEYS) if "pose" in start_kf else ()
-        dry_run = c4.toggle("Dry run (no cap)", value=True, help="Full cycle including open/close, but an empty grab "
+        dry_run = c4.toggle("Dry run (no cap)", value=False, help="Full cycle including open/close, but an empty grab "
                             "is not an error. Use this first, without a cap, to check the wrist turns the right way.")
         params = UnscrewParams(twists=twists, twist_deg=twist_deg, final_lift_mm=final_lift,
                                speed_deg_s=speed, release_pos=release, dry_run=dry_run,
@@ -1086,7 +1096,7 @@ else:
     for i, p in enumerate(poses):
         row = st.columns(COLS)
         row[0].write(i + 1)
-        row[1].write(p["name"])
+        row[1].write(p["name"] + ("  ⚡ start-up only" if p.get("startup") else ""))
         row[2].write(p.get("arm", "arm"))
         row[3].code(keyframe_text(p), language=None)
         row[4].write(p.get("gripper") or "–")
@@ -1226,17 +1236,108 @@ def confirm_pick_place():
     st.button("Yes, run it", type="primary", key="pickplace_yes")
 
 
+def startup_plan():
+    return bottle_startup_plan(load_poses(), ARM2_FIRST_POSE)
+
+
+def reset_both_arms(check=lambda: None, log=print):
+    """Both grippers open; arm2 to its wave start (arm2_wave_start: planned with the wrist half a turn round, then a
+    wrist-only joint move, as Start Up does); arm 1 reset to parking (back out, rise, planned)."""
+    plan, why = startup_plan()
+    if plan is None:
+        raise ValueError(why)
+    parking = arm1_keyframe("parking")
+    if parking is None:
+        raise ValueError("Arm needs a joint keyframe named 'parking'.")
+    log("Opening both grippers")
+    for g in (GRIPPERS["arm"], GRIPPERS["arm2"]):
+        rpc(g.open)
+    check()
+    kf = plan["starts"]["arm2"]
+    now = list(rpc(ARMS["arm2"].get_joint_positions).values)
+    if max(abs(a - b) for a, b in zip(now, kf["values"])) <= 1.0:
+        log("arm2 is already at its wave start")
+    else:
+        if max(abs(a - b) for a, b in zip(now[:5], kf["values"][:5])) > 1.0:
+            log("arm2 to its wave start, wrist half a turn round (motion planner)")
+            MOVER.go(dict(kf, values=kf["approach_values"], name=kf["name"] + " (wrist half a turn round)"))
+        check()
+        log("arm2: wrist into place (joint move, wrist only)")
+        MOVER.joints_to(dict(kf, joint_move=True))
+    check()
+    YG.reset_arm(rpc, ARMS["arm"], GRIPPERS["arm"], parking, check, log, move_joints=plan_arm1_joints,
+                 smooth=smooth_arm1)
+    log("Both arms reset: grippers open, arm at parking, arm2 at its wave start")
+
+
+def startup_wave(check=lambda: None, log=print):
+    """The Simultaneous Start Up wave from the reset positions, then arm2 to its first pose."""
+    plan, why = startup_plan()
+    if plan is None:
+        raise ValueError(why)
+    simultaneous_startup(run, ARMS, GRIPPERS, MOVER, plan["starts"], plan["waves"], plan["finish"], check=check, log=log)
+
+
+@st.dialog("Reset both arms", width="large")
+def confirm_reset_both():
+    st.markdown("1. Open **both grippers** (drops anything they hold).\n"
+                "2. **arm2** to its wave start, **arm2_wave_start** (the mirror of arm's parking): planned with the "
+                "wrist half a turn round, then the wrist turns into place (joint move, wrist only). Skipped if there.\n"
+                f"3. **arm**: back straight out {YG.RESET_RETREAT_MM:.0f} mm, rise to z {YG.RESET_CLEAR_Z:.0f} mm if "
+                "lower, then to **parking** (planned). Skipped if already at parking.")
+    st.caption("Every move but arm2's wrist turn goes through the motion planner. Keep the e-stop in reach.")
+    if st.session_state.get("reset_both_yes"):
+        run_logged("Reset both arms", reset_both_arms)
+        st.rerun()
+    st.button("Yes, reset both arms", type="primary", key="reset_both_yes")
+
+
+@st.dialog("Simultaneous Start Up", width="large")
+def confirm_startup():
+    plan, why = startup_plan()
+    if plan is None:
+        st.error(why)
+        return
+    fmt = lambda w: ", ".join(f"{name} {deg:+.1f}°" for name, deg in w)
+    st.markdown(
+        "1. **arm2** to its wave start, the keyframe **arm2_wave_start**: the mirror image of arm's **parking**, facing "
+        "the middle, camera right side up. If it is elsewhere it is first planned to that spot with the wrist half a "
+        "turn round (the planner refuses the camera-upright version), then turns only its wrist into place (joint "
+        "move). Skipped if already there.\n"
+        "2. **arm** to **parking** (motion planner; skipped if already there).\n"
+        f"3. **Both together**, one turn at a time, always these directions: **arm** {fmt(plan['waves']['arm'])}; "
+        f"**arm2** {fmt(plan['waves']['arm2'])} (left first). Then both wrists back to their start. The turns are "
+        f"joint moves on both arms at once (the motion planner can only move one arm at a time), at {WAVE_SPEED:.0f}°/s "
+        f"and {WAVE_ACCEL:.0f}°/s².\n"
+        f"4. **Both grippers** close and open, together, {GRIP_CYCLES} times, at gripper speed {WAVE_GRIPPER_SPEED:.0f}.\n"
+        f"5. **arm2** to **{ARM2_FIRST_POSE}** (motion planner); **arm** stays at **parking**. Ready for the sequence.")
+    st.caption("The arms move to their starts one at a time; only the wrists turn while both move. "
+               "STOP ALL stops between steps. Keep the e-stop in reach.")
+    if st.session_state.get("startup_yes"):
+        run_logged("Simultaneous Start Up",
+                   functools.partial(simultaneous_startup, run, ARMS, GRIPPERS, MOVER, plan["starts"], plan["waves"],
+                                     plan["finish"]))
+        st.rerun()
+    st.button("Yes, start up both arms", type="primary", key="startup_yes")
+
+
 def simple_view():
     st.subheader("Arm 1")
     st.caption("**Reset** parks arm 1 with the gripper open. **Run** picks the leftmost bottle with YOLO and sets it "
                "down at the place spot, still holding it. Both ask for confirmation first.")
     busy = FULL_RUNNING or (UNSCREWER is not None and UNSCREWER.running) or JOB_RUNNER.running
     c1, c2 = st.columns(2)
-    if c1.button("🏠 Reset arm 1", use_container_width=True, disabled=busy or "arm" not in ARMS, key="simple_reset"):
-        confirm_reset_arm1()
+    if c1.button("🏠 Reset both arms", use_container_width=True, disabled=busy or "arm" not in ARMS or "arm2" not in ARMS,
+                 key="simple_reset", help="Both grippers open, arm to parking, arm2 to its wave start."):
+        confirm_reset_both()
     if c2.button("▶ Run YOLO pick & place", type="primary", use_container_width=True,
                  disabled=busy or "arm" not in ARMS or "arm" not in CAM_RIGS, key="simple_run"):
         confirm_pick_place()
+    both = "arm" in ARMS and "arm2" in ARMS
+    if st.button("🤝 Simultaneous Start Up", use_container_width=True, disabled=busy or not both, key="simple_startup",
+                 help="Both arms to their starts, the same wrist wave at the same time, grippers close and open, "
+                      "then both back at their starts ready for the sequence."):
+        confirm_startup()
     if busy:
         st.info("The full run or the unscrew is running; wait for it to finish.")
     try:
@@ -1301,8 +1402,10 @@ def build_job(with_arm1, unscrew_params):
             YG.pick_and_place(run, rpc, ROBOT, ARMS["arm"], GRIPPERS["arm"], CAM_RIGS["arm"][0], RIGS["arm"][0],
                               RIGS["arm"][1], newmid, parking, cfg, check=check, log=log, move_joints=plan_arm1_joints,
                               reset_first=True, smooth=smooth_arm1)
+    pre = [("Reset both arms (grippers open, arm → parking, arm2 → wave start)", reset_both_arms),
+           ("Both arms: start-up wave, then arm2 to its start", startup_wave)]
     return Job(run, MOVER, TRACKER, UNSCREWER, ARMS["arm2"], GRIPPERS["arm2"], pick, kfs[CAP_LOOK_POSE],
-               dict(kfs[TRASH_DROP_POSE]["pose"]), unscrew_params, halt_all_arms, arm1=ARMS.get("arm"))
+               dict(kfs[TRASH_DROP_POSE]["pose"]), unscrew_params, halt_all_arms, arm1=ARMS.get("arm"), pre=pre)
 
 
 @st.dialog("Run the job", width="large")
@@ -1313,7 +1416,8 @@ def confirm_job(with_arm1, unscrew_params):
         st.error(str(e))
         return
     names = [n for n, _ in job.steps]
-    st.markdown("\n".join(f"{i}. {n}" + (" *(skipped: arm 2 only)*" if i == 1 and not with_arm1 else "")
+    first = 0 if with_arm1 else names.index("Arm 2: look at the bottle top")
+    st.markdown("\n".join(f"{i}. {n}" + (" *(skipped: arm 2 only)*" if i - 1 < first else "")
                           for i, n in enumerate(names, 1)))
     st.caption(f"Speed: arm 2 at {FAST['set_speed']:g}°/s, {FAST['set_acceleration']:g}°/s² (80 % of max) for its moves; "
                f"arm 1's pick & place at the normal {NORMAL['set_speed']:g}°/s. Arm 2 goes back to normal at the end.")
@@ -1328,14 +1432,14 @@ def confirm_job(with_arm1, unscrew_params):
     st.caption("Every move goes through the motion planner. Stop or STOP ALL halts it; a stopped or failed step can "
                "be retried. Keep the e-stop in reach.")
     if st.button("Yes, run it", type="primary", key="job_yes"):
-        JOB_RUNNER.start(job, 0 if with_arm1 else 1)
+        JOB_RUNNER.start(job, first)
         st.rerun()
 
 
 @st.dialog("Run from a step", width="large")
 def confirm_job_from(k, unscrew_params):
     try:
-        job = build_job(k == 0, unscrew_params)
+        job = build_job(True, unscrew_params)
     except ValueError as e:
         st.error(str(e))
         return
@@ -1387,10 +1491,12 @@ def job_view():
         JOB_RUNNER.stop()
         st.rerun()
     with st.expander("Run from a chosen step (e.g. to finish a job after a dashboard restart)", expanded=False):
-        step_names = ["Arm 1: YOLO pick & place", "Arm 2: look at the bottle top", "Arm 2: lock on the cap",
-                      f"Arm 2: down {CAP_DOWN_MM:.0f} mm onto the cap", "Arm 2: unscrew", "Arm 2: back up holding the cap",
-                      "Arm 2: drop the cap in the trash"]
-        pick = st.selectbox("Start at", [f"{i}. {n}" for i, n in enumerate(step_names, 1)], index=6, key="job_from")
+        try:
+            step_names = [n for n, _ in build_job(True, params).steps]
+        except ValueError:
+            step_names = []
+        pick = st.selectbox("Start at", [f"{i}. {n}" for i, n in enumerate(step_names, 1)],
+                            index=max(0, len(step_names) - 1), key="job_from")
         k = int(pick.split(".")[0]) - 1
         if st.button(f"▶ Run from step {k + 1}", disabled=busy, key="job_from_go"):
             confirm_job_from(k, dataclasses.replace(params, start_pose="", start_joints=(), start_target=()))

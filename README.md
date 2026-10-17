@@ -19,9 +19,27 @@ Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer?
 - Save the current pose as a named keyframe, optionally with a gripper action after arriving
 - Reorder, delete, replay (Go) and run all keyframes in order across both arms
 - **Run from … to …**: a range slider under Run sequence to play only part of the sequence (both ends included)
-- **Wrist-wave intro** for `arm`: `parking` → `right1` → `left1` → `right2` → `left2` (Joint 5 twisted about ±60°)
-  → `parking_close` (claw closes) → `parking_open` (claw opens), then the real sequence from `NewMid`. It is
+- **Wrist-wave intro** for `arm`: `parking` → `right1` → `left1` (Joint 5 twisted about ±60°, once each way)
+  → `parking_close` / `parking_open` / `parking_close2` / `parking_open2` (claw closes and opens twice), then the
+  real sequence from `NewMid`. It is
   purely for show, and runs at the start of Run sequence and Full run (not the Simple tab's YOLO routine)
+  The wave keyframes carry `"joint_move": true`. By default (`WAVE_PLANNED = True` in `bottle_task.py`) they go through
+  the motion planner at wave speed (one arm at a time); if the planner refuses a pose at planning time (nothing has
+  moved), that turn is done as a direct joint move instead. With `WAVE_PLANNED = False` they are always direct joint moves, which turn the
+  wrist the taught way (right +59.9°, left −59.5°) and are refused unless joints 0–4 already match. Every other
+  keyframe stays planned. Re-saving one of these keyframes with **Save keyframe** drops the flag; add it back in
+  `poses.json`.
+  Wave turns run faster than normal moves: 144°/s and 916°/s², 80% of the module limits of 180°/s and 1145°/s²
+  (`WAVE_SPEED` / `WAVE_ACCEL`), and the wave's gripper close/open runs at gripper speed 4000, 80% of the 5000 maximum
+  (`WAVE_GRIPPER_SPEED`). All are set through DoCommand just for the wave and restored to 60°/s, 381.67°/s² and 2000
+  afterwards, even on errors. Other moves always run at the normal values.
+- **🤝 Simultaneous Start Up** (Simple tab): `arm2` to its wave start (`arm2_wave_start`, the mirror of `arm`'s
+  `parking`), then `arm` to `parking` (planned, one at a time), then both wrists turn together as joint moves on
+  both arms at once (arm right then left, arm2 left then right, the same angles; the motion service can move only
+  one arm at a time, so `STARTUP_PLANNED` is False), both grippers close and open twice, and `arm2` goes to
+  `safe_bottle_start_pose`, ready for the sequence. `arm2`'s start-up poses are the three keyframes
+  `arm2_wave_start`, `arm2_wave_left` and `arm2_wave_right` in `poses.json` (flagged `"startup": true`): they show in
+  the Sequence steps table, Start Up reads them (edit them to change it), and Run sequence and Full run skip them.
 - Export keyframes as a Python `POSES = {...}` dict for use in your own scripts
 - STOP ALL button for both arms (also stops the unscrew and the full run)
 - **Unscrew** (`arm2`): regrasp unscrew of the cap (grab, twist, open, twist back; the last twist lifts the cap)
