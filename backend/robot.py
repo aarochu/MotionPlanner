@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -47,7 +48,16 @@ class Robot:
         if self._robot is None:
             async with self._lock:
                 if self._robot is None:
-                    opts = RobotClient.Options(refresh_interval=0)
+                    if not API_KEY_ID.strip() or not API_KEY.strip():
+                        raise RuntimeError(
+                            "Set VIAM_API_KEY_ID and VIAM_API_KEY in .env or "
+                            "backend/.env (or env.sh when using ./run.sh), then restart the backend."
+                        )
+                    opts = RobotClient.Options.with_api_key(
+                        api_key=API_KEY,
+                        api_key_id=API_KEY_ID,
+                        refresh_interval=0,
+                    )
                     self._robot = await RobotClient.at_address(ADDRESS, opts)
         return self._robot
 
@@ -75,33 +85,36 @@ class Robot:
 # Module-level singleton used by route handlers.
 _robot = Robot()
 _loop: asyncio.AbstractEventLoop | None = None
+_loop_lock = threading.Lock()
+_loop_thread: threading.Thread | None = None
 
 
 def _get_loop() -> asyncio.AbstractEventLoop:
-    global _loop
-    if _loop is None or _loop.is_closed():
-        _loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_loop)
+    global _loop, _loop_thread
+    with _loop_lock:
+        if _loop is None:
+            _loop = asyncio.new_event_loop()
+
+            def serve() -> None:
+                asyncio.set_event_loop(_loop)
+                _loop.run_forever()
+
+            _loop_thread = threading.Thread(target=serve, name="viam-sdk", daemon=True)
+            _loop_thread.start()
     return _loop
 
 
 def run(coro) -> Any:
-    """Run an async coroutine. Works both inside and outside a running event loop.
+    """Submit every SDK call to one persistent loop, including connect and close.
 
-    If called from within uvicorn's running event loop, the coroutine is executed
-    in a worker thread with its own event loop to avoid nested-loop errors.
+    FastAPI worker threads can submit concurrently. Keeping the loop alive also
+    preserves the client's background tasks between requests.
     """
-    try:
-        asyncio.get_running_loop()
-        # Inside a running loop (e.g. uvicorn): use a worker thread.
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(asyncio.run, coro)
-            return future.result()
-    except RuntimeError:
-        # No running loop: create one and block on it.
-        loop = _get_loop()
-        return loop.run_until_complete(coro)
+    loop = _get_loop()
+    if threading.current_thread() is _loop_thread:
+        coro.close()
+        raise RuntimeError("Cannot call blocking run() from the Viam event loop")
+    return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
 
 def connect() -> None:
@@ -197,15 +210,14 @@ def camera_frame(cam_name: str) -> bytes:
 def list_arm_names() -> list[str]:
     """Return the arm resource names configured on the machine."""
     robot = run(_robot.connect())
-    return [r for r in robot.resource_names(subtype="arm")]
+    return [r.name for r in robot.resource_names if r.type == "component" and r.subtype == "arm"]
 
 
 def list_all_resource_names() -> dict[str, list[str]]:
     robot = run(_robot.connect())
     return {
-        "arm": list(robot.resource_names(subtype="arm")),
-        "camera": list(robot.resource_names(subtype="camera")),
-        "gripper": list(robot.resource_names(subtype="gripper")),
+        subtype: [r.name for r in robot.resource_names if r.type == "component" and r.subtype == subtype]
+        for subtype in ("arm", "camera", "gripper")
     }
 
 

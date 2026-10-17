@@ -624,10 +624,12 @@ function buildJointBox(arm, j, pos) {
   let html = `<div style="font-weight:600; color:var(--accent); margin-bottom:6px;">${arm}</div>`;
   html += `<div style="font-size:.72rem; color:var(--muted); margin-bottom:8px;">joints: ${j.values.map(v => v.toFixed(1)).join(", ")}</div>`;
   html += `<div style="font-size:.72rem; color:var(--muted); margin-bottom:8px;">end: x ${pos.x.toFixed(0)} y ${pos.y.toFixed(0)} z ${pos.z.toFixed(0)}</div>`;
+  box.innerHTML = html;
+  box.children[1].className = "joint-reading";
+  box.children[2].className = "position-reading";
   // jog buttons
   const jog = document.createElement("div");
   jog.style.cssText = "margin-top:6px; display:flex; gap:4px; flex-wrap:wrap;";
-  const step = parseFloat(document.getElementById("jogStep").value || 2);
   for (let i = 0; i < 6; i++) {
     for (const dir of [-1, 1]) {
       const b = document.createElement("button");
@@ -638,6 +640,7 @@ function buildJointBox(arm, j, pos) {
         try {
           const cur = await api(`/api/arm/${arm}/joints`);
           const vals = cur.values.map(Number);
+          const step = parseFloat(document.getElementById("jogStep").value || 2);
           vals[i] += dir * step;
           await api(`/api/arm/${arm}/move/joints`, { method: "POST", body: JSON.stringify({ values: vals }) });
           log(`${arm} jog J${i}${dir > 0 ? "+" : "−"}`);
@@ -666,8 +669,11 @@ function buildJointBox(arm, j, pos) {
   return box;
 }
 
+const jointPanels = new Map();
+let jointsRefreshing = false;
 async function refreshJoints() {
-  if (!connected) return;
+  if (!connected || jointsRefreshing) return;
+  jointsRefreshing = true;
   try {
     const data = await api("/api/arms");
     if (lastJointsError !== null) {
@@ -676,8 +682,13 @@ async function refreshJoints() {
     }
     const grid = document.getElementById("jointsGrid");
     const tgtGrid = document.getElementById("jointTargets");
-    grid.innerHTML = "";
-    tgtGrid.innerHTML = "";
+    for (const [arm, panels] of jointPanels) {
+      if (!(data.arms || []).includes(arm)) {
+        panels.live.remove();
+        panels.targets.remove();
+        jointPanels.delete(arm);
+      }
+    }
     if (!data.arms || data.arms.length === 0) {
       log("No arms configured. Set VIAM_API_KEY_ID and VIAM_API_KEY in .env.", "warn");
       return;
@@ -686,7 +697,14 @@ async function refreshJoints() {
       try {
         const j = await api(`/api/arm/${arm}/joints`);
         const pos = await api(`/api/arm/${arm}/position`);
-        grid.appendChild(buildJointBox(arm, j, pos));
+        const existing = jointPanels.get(arm);
+        if (existing) {
+          existing.live.querySelector(".joint-reading").textContent = `joints: ${j.values.map(v => v.toFixed(1)).join(", ")}`;
+          existing.live.querySelector(".position-reading").textContent = `end: x ${pos.x.toFixed(0)} y ${pos.y.toFixed(0)} z ${pos.z.toFixed(0)}`;
+          continue;
+        }
+        const live = buildJointBox(arm, j, pos);
+        grid.appendChild(live);
 
         // target inputs (shared grid)
         const box = document.createElement("div");
@@ -702,6 +720,7 @@ async function refreshJoints() {
           box.appendChild(inp);
         }
         tgtGrid.appendChild(box);
+        jointPanels.set(arm, { live, targets: box });
       } catch (e) {
         const key = `arm-${arm}`;
         if (lastJointsError !== key) {
@@ -715,6 +734,8 @@ async function refreshJoints() {
       lastJointsError = e.message;
       log("joints refresh failed: " + e.message, "err");
     }
+  } finally {
+    jointsRefreshing = false;
   }
 }
 refreshJoints();
@@ -761,27 +782,13 @@ async function armAction(arm, action) {
 }
 
 document.getElementById("btnResetArm1").onclick = async () => {
-  const method = document.getElementById("approachMethod").value;
   busy(true);
   setBusyOverlay("busyArm1", true);
   setStatus("arm1Status", "resetting", "busy");
   try {
-    await api("/api/arm/arm/gripper/open", { method: "POST" });
-    log("arm 1: opening gripper");
-    if (method === "vision") {
-      log("arm 1: vision mode — using YOLO pick & place instead of taught reset");
-      const res = await api("/api/pick_and_place", { method: "POST" });
-      log(`arm 1: YOLO pick & place done: ${res.frames} frames`);
-    } else {
-      const poses = await api("/api/poses");
-      const pkf = (poses.poses.arm || []).find(k => k.name === "parking");
-      if (pkf && pkf.values) {
-        await api("/api/arm/arm/move/joints", { method: "POST", body: JSON.stringify({ values: pkf.values }) });
-        log("arm 1: moved to parking (taught)");
-      } else {
-        log("no 'parking' keyframe found in poses.json", "warn");
-      }
-    }
+    log("arm 1: reset requested — open gripper, retreat, rise, then parking");
+    await api("/api/reset_arm1", { method: "POST" });
+    log("arm 1: reset complete");
   } catch (e) { log("reset arm 1 failed: " + e.message, "err"); }
   finally { busy(false); setBusyOverlay("busyArm1", false); setStatus("arm1Status", "idle"); }
 };

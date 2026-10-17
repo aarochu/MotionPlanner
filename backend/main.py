@@ -357,9 +357,13 @@ def api_pick_and_place() -> dict[str, str]:
 def api_reset_arm1() -> dict[str, str]:
     """Reset arm 1: open gripper, move to parking keyframe."""
     try:
+        parking = next((p for p in load_poses(POSES_FILE)
+                        if p.get("arm") == "arm" and p.get("name") == "parking"), None)
+        if parking is None or len(parking.get("values", [])) != 6:
+            raise ValueError("Arm 1 needs a parking keyframe with six joint angles")
         yg_reset_arm(
             arm_name="arm", gripper_name="gripper",
-            parking=[-34.8, -75.8, -2.9, 164.9, 9.4, 194.1],
+            parking=parking["values"],
         )
         return {"status": "ok"}
     except Exception as exc:
