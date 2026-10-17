@@ -241,7 +241,10 @@
       <div class="setting-row"><label>Min YOLO confidence</label><input type="number" id="ycConf" value="0.5" min="0.1" max="0.95" step="0.05"></div>
       <div class="setting-row"><label>Frames to measure</label><input type="number" id="ycFrames" value="3" min="1" max="10"></div>
       <div class="setting-row"><label>Bottle radius (mm)</label><input type="number" id="ycRadius" value="40" min="10" max="80"></div>
+      <div class="setting-row"><label>Grasp height (fraction of bottle height)</label><input type="number" id="ycGraspFrac" value="0.35" min="0.1" max="0.7" step="0.05"></div>
+      <div class="setting-row"><label>Finger pads beyond gripper frame (mm)</label><input type="number" id="ycPad" value="60" min="20" max="100" step="1"></div>
       <div class="setting-row"><label>Pre-grasp distance (mm)</label><input type="number" id="ycPre" value="100" min="60" max="200"></div>
+      <div class="setting-row"><label>Gripper opening (mm)</label><input type="number" id="ycStroke" value="84" min="50" max="90" step="1"></div>
       <div class="setting-row"><label>Lateral trim (+ = right, mm)</label><input type="number" id="ycLat" value="18" min="-50" max="50"></div>
       <div class="setting-row"><label>Depth trim (+ = deeper, mm)</label><input type="number" id="ycDepth" value="20" min="-40" max="40"></div>
       <div class="setting-row"><label style="min-width:150px;">Level gripper on approach</label><input type="checkbox" id="ycLevel" checked style="width:auto; min-width:auto;"></div>
@@ -1014,7 +1017,10 @@ async function yoloLocate() {
     conf: parseFloat(document.getElementById("ycConf").value) || 0.5,
     frames: parseInt(document.getElementById("ycFrames").value) || 3,
     radius: parseFloat(document.getElementById("ycRadius").value) || 40,
+    grasp_frac: parseFloat(document.getElementById("ycGraspFrac").value) || 0.35,
+    pad_mm: parseFloat(document.getElementById("ycPad").value) || 60,
     pre_mm: parseFloat(document.getElementById("ycPre").value) || 100,
+    stroke_mm: parseFloat(document.getElementById("ycStroke").value) || 84,
     lat_trim_mm: parseFloat(document.getElementById("ycLat").value) || 18,
     depth_trim_mm: parseFloat(document.getElementById("ycDepth").value) || 20,
     level: document.getElementById("ycLevel").checked,
