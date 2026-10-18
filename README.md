@@ -7,8 +7,8 @@ other unscrews the cap.
 It drives the `arm` / `gripper` and `arm2` / `gripper2` components on a Viam machine (`armfarm16`).
 
 New here (engineer or AI agent)? Read [`AGENTS.md`](AGENTS.md) for the full project context.
-Picking up the bottle-stabilizer (`arm`) work? Start with [`HANDOFF.md`](HANDOFF.md).
-Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer? See [`RUN_BOTH.md`](RUN_BOTH.md).
+Picking up the bottle-stabilizer (`arm`) work? Start with [`HANDOFF.md`](docs/HANDOFF.md).
+Running Aaron's `arm` sequence and then Rishi's `arm2` sequence on one computer? See [`RUN_BOTH.md`](docs/RUN_BOTH.md).
 
 ## Features
 

@@ -4,7 +4,7 @@ This file explains what this repo is for, how the hardware is set up, what has b
 that way, what is verified, and what is still open. Read it before changing anything. It reflects Aaron's work
 up to the creation of the `aaron-main` branch, plus Rishi's `arm2` unscrew / full run merged in on `full-sequence`.
 
-Related docs: `README.md` (features, setup), `HANDOFF.md` (short handoff for the `arm` work), `RUN_BOTH.md`
+Related docs: `README.md` (features, setup), `docs/HANDOFF.md` (short handoff for the `arm` work), `docs/RUN_BOTH.md`
 (running both arms' sequences on one computer).
 
 ## 1. Goal
@@ -251,7 +251,7 @@ absolute accuracy of positions against a tape measure; the alignment fix's effec
   sourced; point `POSES_FILE` / `GRAB_REF_FILE` / `VISION_CONFIG_FILE` at temp copies so real files aren't
   touched, and never click the confirm buttons ("Yes, move", "Yes, run").
 - Rishi's checkout has an untracked `poses.json`; git refuses to check out a branch that tracks it until it is
-  moved aside (`RUN_BOTH.md` covers this).
+  moved aside (`docs/RUN_BOTH.md` covers this).
 - Streamlit prints `use_container_width` deprecation warnings; harmless.
 
 ## 12. Branches
@@ -260,8 +260,8 @@ absolute accuracy of positions against a tape measure; the alignment fix's effec
 |---|---|
 | `main` | Everything through the `arm` keyframes |
 | `cam_branch` | Rishi's original cam2/cap work (its commit message has an AI co-author trailer; the squashed copy in this history does not) |
-| `bottle-stabilizer` | `main` + `HANDOFF.md` |
-| `combined-sequence` | + Run "arm, then arm2", `poses_io.py`, `import_poses.py`, `RUN_BOTH.md` |
+| `bottle-stabilizer` | `main` + `docs/HANDOFF.md` |
+| `combined-sequence` | + Run "arm, then arm2", `poses_io.py`, `import_poses.py`, `docs/RUN_BOTH.md` |
 | `aaron-main` | Everything above + this file |
 | `rishi-sequence` | Rishi's work: cap detection fixes, unscrew, full run, XYZ keyframes, `arm2` keyframes |
 | `full-sequence` | `aaron-main` + `rishi-sequence` merged: Full run plays arm's sequence, then arm2's. **Start here.** |
